@@ -1,0 +1,11 @@
+{
+  "name": "Canadex",
+  "short_name": "Canadex",
+  "description": "A retro strain index you fill in by scanning labels.",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0c0714",
+  "theme_color": "#5b21b6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

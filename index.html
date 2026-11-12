@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#5b21b6">
+<title>Canadex</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="device">
+  <section class="panel upper">
+    <header class="head">
+      <span id="led" class="led" aria-hidden="true"></span>
+      <div class="visor" aria-hidden="true"><i></i></div>
+      <div class="grille" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    </header>
+    <div class="bezel">
+      <div class="bezel-label"><span>STRAIN INDEX UNIT</span><span>MODEL CX-01</span></div>
+      <div class="lcd-wrap">
+        <div id="lcd" class="lcd" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="hinge" aria-hidden="true"></div>
+
+  <section class="panel lower controls">
+    <div class="pad-row">
+      <div class="dpad">
+        <button data-btn="up" aria-label="Up">▲</button>
+        <button data-btn="left" aria-label="Left">◀</button>
+        <span class="hub"></span>
+        <button data-btn="right" aria-label="Right">▶</button>
+        <button data-btn="down" aria-label="Down">▼</button>
+      </div>
+      <div class="keys">
+        <button data-btn="scan" class="key scan">SCAN</button>
+        <div class="key-pair">
+          <button data-btn="b" class="key">BACK</button>
+          <button data-btn="a" class="key">OK</button>
+        </div>
+      </div>
+    </div>
+    <div class="strip">
+      <button data-btn="index" class="soft">INDEX</button>
+      <button data-btn="voice" class="soft" id="voiceBtn">VOICE</button>
+      <button data-btn="home" class="soft">MENU</button>
+    </div>
+    <div class="brand">CANADEX</div>
+  </section>
+</main>
+
+<input type="file" id="file" accept="image/*" capture="environment" hidden>
+<script src="strains.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
