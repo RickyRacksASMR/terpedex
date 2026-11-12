@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS reports (
   state      TEXT NOT NULL,             -- US state (or country) seen at the network edge
   lane       TEXT NOT NULL,             -- FLOWER / CONCENTRATES / TOPICALS / EDIBLES
   thc        REAL,                      -- THC % read off the label, if any
+  type       TEXT,                      -- Indica / Sativa / Hybrid as printed on the label, if the user answered
+  terp       TEXT,                      -- top terpene printed on the label, if the user answered
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (key, device)

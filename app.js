@@ -85,7 +85,7 @@ const communityBlurb = (c) => `Reported by ${c.users} Terpedex ${c.users === 1 ?
   (c.users < 2 ? 'Unconfirmed: only one person has logged it so far.' : 'Community entry, not lab verified.');
 function applyCommunity(list) {
   for (const c of list) {
-    const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {} };
+    const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {}, types: c.types || {}, terps: c.terps || {} };
     const known = byKey.get(c.key);
     if (known) {
       known.community = info;
@@ -123,13 +123,13 @@ async function syncCommunity() {
 
 // Tell the shared database this device has this strain. Sends the strain name, the
 // user's lane, the label THC and a random device id; nothing that identifies a person.
-async function reportStrain(s, thc) {
+async function reportStrain(s, thc, answers = {}) {
   if (!API || !S.profile) return;
   try {
     const r = await fetch(`${API}/report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: s.name, device: deviceId(), lane: S.profile.type, thc: thc ?? null }),
+      body: JSON.stringify({ name: s.name, device: deviceId(), lane: S.profile.type, thc: thc ?? null, type: answers.type || null, terp: answers.terp || null }),
     });
     if (!r.ok) return;
     const { strain } = await r.json();
@@ -173,11 +173,49 @@ function addCustom(raw) {
 
 function logStrain(id, thc) {
   const prev = S.log[id];
-  S.log[id] = { first: prev?.first || Date.now(), n: (prev?.n || 0) + 1, thc: thc ?? prev?.thc ?? null };
+  S.log[id] = { ...prev, first: prev?.first || Date.now(), n: (prev?.n || 0) + 1, thc: thc ?? prev?.thc ?? null };
   store.set('log', S.log);
   const s = STRAINS.find((x) => x.id === id);
   if (s) reportStrain(s, thc);
   return !prev;
+}
+
+// Label questions. Entries without a type on file get two quick questions, answered
+// from the label; answers are pooled across users and only count once people agree.
+const LABEL_TYPES = ['Indica', 'Sativa', 'Hybrid'];
+const LABEL_TERPS = ['Myrcene', 'Limonene', 'Caryophyllene', 'Pinene', 'Linalool', 'Terpinolene', 'Humulene', 'Ocimene'];
+const hasOwnType = (s) => LABEL_TYPES.includes(s.type);
+
+// The leading answer for a set of votes. Confirmed means at least two people gave it
+// and they are a clear majority.
+function consensus(votes) {
+  const ranked = Object.entries(votes || {}).sort((a, b) => b[1] - a[1]);
+  if (!ranked.length) return null;
+  const total = ranked.reduce((n, v) => n + v[1], 0);
+  const [value, n] = ranked[0];
+  return { value, n, total, confirmed: n >= 2 && n / total >= 0.6 };
+}
+
+function register(s, thc) {
+  const isNew = logStrain(s.id, thc);
+  beep(1320, 120);
+  if (!hasOwnType(s) && !S.log[s.id].asked) {
+    S.pending = { s, isNew, type: null };
+    return go('askType');
+  }
+  openEntry(s, isNew, 'home');
+}
+
+function finishAsk(terp) {
+  const { s, isNew, type } = S.pending;
+  const l = S.log[s.id];
+  l.asked = true;
+  if (type) l.type = type;
+  if (terp) l.terp = terp;
+  store.set('log', S.log);
+  if (type || terp) reportStrain(s, l.thc, { type, terp });
+  S.pending = null;
+  openEntry(s, isNew, 'home');
 }
 
 function lev(a, b) {
@@ -295,9 +333,11 @@ function narration(s, isNew) {
       `This one is not in the reference index yet. ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
   }
   const intro = `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. `;
+  const ct = s.community && consensus(s.community.types);
+  const said = ct && !hasOwnType(s) ? `Users report it as ${ct.value}${ct.confirmed ? '' : ', not yet confirmed'}. ` : '';
   if (s.shared) {
     const thc = S.log[s.id]?.thc;
-    return intro + `${s.blurb} ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
+    return intro + `${s.blurb} ${said}${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
   }
   if (s.fromLab) {
     return intro + (s.type !== 'Lab-tested' ? `${s.type}. ` : '') +
@@ -473,9 +513,7 @@ function handleText(text) {
     go('nomatch'); speak('Unknown specimen. No match in the index.');
     return;
   }
-  const isNew = logStrain(s.id, parseThc(text) ?? S.thcSeen);
-  beep(1320, 120);
-  openEntry(s, isNew, 'home');
+  register(s, parseThc(text) ?? S.thcSeen);
 }
 
 $('#file').addEventListener('change', (e) => {
@@ -543,6 +581,20 @@ const screens = {
     a: (i) => { const s = dexList()[i]; if (!s) return; if (S.log[s.id]) openEntry(s, false, 'dex', i); else { S.backCursor = i; go('locked'); } },
     b: () => go('home'),
   },
+  askType: {
+    count: 4,
+    render: () => `<h1>LABEL CHECK 1/2</h1><p>WHAT TYPE DOES THE LABEL SAY?</p><p class="sub">ANSWER ONLY FROM THE LABEL. IT HELPS CONFIRM THIS ENTRY FOR EVERYONE.</p>` +
+      menu([...LABEL_TYPES.map((t) => t.toUpperCase()), 'NOT ON THE LABEL']) + `<p class="hint">BACK: SKIP</p>`,
+    a: (i) => { S.pending.type = LABEL_TYPES[i] || null; go('askTerp'); },
+    b: () => finishAsk(null),
+  },
+  askTerp: {
+    count: LABEL_TERPS.length + 1,
+    render: () => `<h1>LABEL CHECK 2/2</h1><p>TOP TERPENE LISTED ON THE LABEL?</p>` +
+      menu([...LABEL_TERPS.map((t) => t.toUpperCase()), 'NOT ON THE LABEL']) + `<p class="hint">BACK: SKIP</p>`,
+    a: (i) => finishAsk(LABEL_TERPS[i] || null),
+    b: () => finishAsk(null),
+  },
   locked: {
     render: () => `<h1>NO DATA</h1><p>THIS ENTRY HAS NOT BEEN REGISTERED YET.</p><p>SCAN A LABEL OR USE LOOKUP TO LOG IT.</p><p class="hint">BACK: RETURN</p>`,
     a: () => go('dex', S.backCursor), b: () => go('dex', S.backCursor),
@@ -557,19 +609,23 @@ const screens = {
         thcRow = `<div class="row"><b>THC</b><span style="flex:1">${s.thc[0]}–${s.thc[1]}% ${s.fromLab ? 'IN LAB TESTS' : 'TYPICAL'}<br><span class="bar"><i style="left:${lo}%;width:${Math.max(2, hi - lo)}%"></i></span></span></div>`;
       }
       const tip = laneTip(s);
+      const ct = s.community && consensus(s.community.types), cp = s.community && consensus(s.community.terps);
+      const tag = hasOwnType(s) ? s.type : ct ? ct.value + (ct.confirmed ? '' : ' ?') : s.shared && s.community.users < 2 ? 'Unconfirmed' : s.type;
+      const vote = (label, c) => `${label}: ${c.value.toUpperCase()} · ${c.n} OF ${c.total} · ${c.confirmed ? 'CONFIRMED' : 'UNCONFIRMED'}`;
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
-        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${s.shared && s.community.users < 2 ? 'UNCONFIRMED' : esc(s.type.toUpperCase())}</span></div></div>` +
+        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${esc(tag.toUpperCase())}</span></div></div>` +
         `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
         row('LINEAGE', s.lineage && esc(s.lineage)) +
         thcRow +
-        row('LABEL', l.thc != null && `${l.thc}% THC`) +
+        row('LABEL', [l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · ')) +
         row('TERPENES', s.terpenes && esc(s.terpenes)) +
         row('FLAVOR', s.flavors && esc(s.flavors)) +
         row('REPORTED', s.effects && esc(s.effects)) +
         row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
         row('YOUR LANE', s.custom && S.profile.type) +
         row('COMMUNITY', s.community && [`${s.community.users} ${s.community.users === 1 ? 'USER' : 'USERS'}${s.community.states ? ` · ${s.community.states}` : ''}`,
-          ...Object.entries(s.community.thc).map(([lane, t]) => `${lane} LABELS ${t.lo === t.hi ? t.lo : `${t.lo}–${t.hi}`}% THC (${t.n})`)].join('<br>')) +
+          ...Object.entries(s.community.thc).map(([lane, t]) => `${lane} LABELS ${t.lo === t.hi ? t.lo : `${t.lo}–${t.hi}`}% THC (${t.n})`),
+          ct && vote('TYPE', ct), cp && vote('TOP TERPENE', cp)].filter(Boolean).join('<br>')) +
         `<div class="rule"></div>` + (tip ? `<p class="sub">${esc(tip)}</p>` : '') +
         `<p class="sub">SCANNED ${l.n || 0}X · ${s.effects ? 'EFFECTS VARY BY PERSON AND BATCH. ' : ''}NOT MEDICAL ADVICE.</p>` +
         (s.lab ? `<p class="sub">LAB DATA: CANNLYTICS, CC BY 4.0.</p>` : '') +
@@ -612,9 +668,7 @@ const screens = {
       const c = candidates();
       if (i >= c.length) return go(['lookup', 'scan', 'home'][i - c.length]);
       const s = addCustom(c[i]);
-      const isNew = logStrain(s.id, S.thcSeen);
-      beep(1320, 120);
-      openEntry(s, isNew, 'home');
+      register(s, S.thcSeen);
     },
     b: () => go('home'),
   },
@@ -637,9 +691,7 @@ const screens = {
     a: (i) => {
       const s = searchStrains(S.q)[i] || (S.q.trim().length >= 3 ? addCustom(S.q) : null);
       if (!s) return;
-      const isNew = logStrain(s.id, S.thcSeen);
-      beep(1320, 120);
-      openEntry(s, isNew, 'home');
+      register(s, S.thcSeen);
     },
     b: () => go('home'),
   },
