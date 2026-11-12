@@ -1,13 +1,14 @@
 // Terpedex shared database: a Cloudflare Worker in front of a D1 (SQLite) database.
 //
 //   GET  /strains  -> every strain users have reported, with who/where/label-THC summaries
-//   POST /report   -> { name, device, lane, thc, type?, terp? } one device saying "I have this strain",
+//   POST /report   -> { name, device, lane, thc, type?, terp?, feel? } one device saying "I have this strain",
 //                     optionally with what its label says about type and top terpene
 //
 // Nothing here is trusted as fact: an entry only says what users reported, and how many did.
 
 const LANES = ['FLOWER', 'CONCENTRATES', 'TOPICALS', 'EDIBLES'];
 const TYPES = ['Indica', 'Sativa', 'Hybrid'];
+const FEELS = ['Energizing', 'Balanced', 'Relaxing', 'Couch-lock', 'Sleepy'];
 const TERPS = ['Myrcene', 'Limonene', 'Caryophyllene', 'Pinene', 'Linalool', 'Terpinolene', 'Humulene', 'Ocimene'];
 const DAY = 24 * 60 * 60 * 1000;
 const MAX_REPORTS_PER_DAY = 60;
@@ -54,10 +55,10 @@ async function summaries(env, key) {
   const votes = (col) => env.DB.prepare(
     `SELECT r.key, r.${col} AS v, COUNT(*) AS n FROM reports r ${where ? where + ' AND' : 'WHERE'} r.${col} IS NOT NULL GROUP BY r.key, r.${col}`,
   ).bind(...bind).all();
-  const [types, terps] = await Promise.all([votes('type'), votes('terp')]);
+  const [types, terps, feels] = await Promise.all([votes('type'), votes('terp'), votes('feel')]);
   const byKey = new Map();
   for (const s of strains.results) {
-    byKey.set(s.key, { key: s.key, name: s.name, users: s.users, states: (s.states || '').split(',').filter(Boolean).sort(), thc: {}, types: {}, terps: {} });
+    byKey.set(s.key, { key: s.key, name: s.name, users: s.users, states: (s.states || '').split(',').filter(Boolean).sort(), thc: {}, types: {}, terps: {}, feels: {} });
   }
   for (const l of lanes.results) {
     const s = byKey.get(l.key);
@@ -65,6 +66,7 @@ async function summaries(env, key) {
   }
   for (const t of types.results) { const s = byKey.get(t.key); if (s) s.types[t.v] = t.n; }
   for (const t of terps.results) { const s = byKey.get(t.key); if (s) s.terps[t.v] = t.n; }
+  for (const t of feels.results) { const s = byKey.get(t.key); if (s) s.feels[t.v] = t.n; }
   return [...byKey.values()];
 }
 
@@ -84,6 +86,7 @@ async function report(req, env) {
   if (thc != null && !(thc > 0 && thc <= 100)) thc = null;
   const type = TYPES.includes(body.type) ? body.type : null;
   const terp = TERPS.includes(body.terp) ? body.terp : null;
+  const feel = FEELS.includes(body.feel) ? body.feel : null;
 
   // Region comes from Cloudflare's edge, not from the client. The IP itself is never stored.
   const cf = req.cf || {};
@@ -105,11 +108,12 @@ async function report(req, env) {
     env.DB.prepare('INSERT OR IGNORE INTO strains (key, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)')
       .bind(key, name, device, now),
     env.DB.prepare(
-      `INSERT INTO reports (key, device, state, lane, thc, type, terp, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+      `INSERT INTO reports (key, device, state, lane, thc, type, terp, feel, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
        ON CONFLICT (key, device) DO UPDATE SET
          state = excluded.state, lane = excluded.lane, thc = COALESCE(excluded.thc, reports.thc),
-         type = COALESCE(excluded.type, reports.type), terp = COALESCE(excluded.terp, reports.terp), updated_at = excluded.updated_at`,
-    ).bind(key, device, state, lane, thc, type, terp, now),
+         type = COALESCE(excluded.type, reports.type), terp = COALESCE(excluded.terp, reports.terp),
+         feel = COALESCE(excluded.feel, reports.feel), updated_at = excluded.updated_at`,
+    ).bind(key, device, state, lane, thc, type, terp, feel, now),
   ]);
 
   return { ok: true, strain: (await summaries(env, key))[0] };

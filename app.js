@@ -85,7 +85,7 @@ const communityBlurb = (c) => `Reported by ${c.users} Terpedex ${c.users === 1 ?
   (c.users < 2 ? 'Unconfirmed: only one person has logged it so far.' : 'Community entry, not lab verified.');
 function applyCommunity(list) {
   for (const c of list) {
-    const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {}, types: c.types || {}, terps: c.terps || {} };
+    const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {}, types: c.types || {}, terps: c.terps || {}, feels: c.feels || {} };
     const known = byKey.get(c.key);
     if (known) {
       known.community = info;
@@ -129,7 +129,7 @@ async function reportStrain(s, thc, answers = {}) {
     const r = await fetch(`${API}/report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: s.name, device: deviceId(), lane: S.profile.type, thc: thc ?? null, type: answers.type || null, terp: answers.terp || null }),
+      body: JSON.stringify({ name: s.name, device: deviceId(), lane: S.profile.type, thc: thc ?? null, type: answers.type || null, terp: answers.terp || null, feel: answers.feel || null }),
     });
     if (!r.ok) return;
     const { strain } = await r.json();
@@ -327,27 +327,15 @@ function laneTip(s) {
 }
 
 function narration(s, isNew) {
-  if (s.custom) {
-    const thc = S.log[s.id]?.thc;
-    return `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. ` +
-      `This one is not in the reference index yet. ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
-  }
   const intro = `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. `;
-  const ct = s.community && consensus(s.community.types);
-  const said = ct && !hasOwnType(s) ? `Users report it as ${ct.value}${ct.confirmed ? '' : ', not yet confirmed'}. ` : '';
-  if (s.shared) {
-    const thc = S.log[s.id]?.thc;
-    return intro + `${s.blurb} ${said}${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
-  }
-  if (s.fromLab) {
-    return intro + (s.type !== 'Lab-tested' ? `${s.type}. ` : '') +
-      `Measured in ${s.lab.n} public lab tests. THC ran from ${s.thc[0]} to ${s.thc[1]} percent, with a median of ${s.lab.med}. ` +
-      (s.terpenes ? `Dominant terpenes: ${s.terpenes}. ` : '') + laneTip(s);
-  }
-  return intro + `${s.type}. ${s.blurb} ` +
-    `Lineage: ${s.lineage.replace(/ x /g, ' crossed with ').replace(/#/g, 'number ')}. ` +
-    `Dominant terpenes: ${s.terpenes}. ` +
-    (s.lab ? `In ${s.lab.n} public lab tests, the median THC was ${s.lab.med} percent. ` : '') + laneTip(s);
+  const thc = S.log[s.id]?.thc;
+  const label = thc != null ? `Your label reads ${thc} percent THC. ` : '';
+  let body;
+  if (s.custom) body = 'This one is not in the reference index yet. ';
+  else if (s.shared) body = `${s.blurb} `;
+  else if (s.fromLab) body = `Measured in ${s.lab.n} public lab tests. `;
+  else body = `${s.type}. ${s.blurb} Lineage: ${s.lineage.replace(/ x /g, ' crossed with ').replace(/#/g, 'number ')}. `;
+  return intro + body + profileSpeech(s) + label + laneTip(s);
 }
 
 function openEntry(s, isNew, back, backCursor = 0) {
@@ -595,6 +583,23 @@ const screens = {
     a: (i) => finishAsk(LABEL_TERPS[i] || null),
     b: () => finishAsk(null),
   },
+  askFeel: {
+    count: FEELS.length + 1,
+    render: () => `<h1>RATE IT</h1><p>HOW DID ${esc(S.entry.name.toUpperCase())} HIT YOU?</p><p class="sub">ONLY RATE IT IF YOU HAVE TRIED IT. RATINGS ARE POOLED WITH OTHER USERS.</p>` +
+      menu([...FEELS.map((f) => f.toUpperCase()), "HAVEN'T TRIED IT"]) + `<p class="hint">BACK: CANCEL</p>`,
+    a: (i) => {
+      const s = S.entry, feel = FEELS[i];
+      if (feel) {
+        const l = S.log[s.id];
+        l.feel = feel;
+        store.set('log', S.log);
+        reportStrain(s, l.thc, { feel });
+      }
+      S.isNew = false;
+      go('entry');
+    },
+    b: () => go('entry'),
+  },
   locked: {
     render: () => `<h1>NO DATA</h1><p>THIS ENTRY HAS NOT BEEN REGISTERED YET.</p><p>SCAN A LABEL OR USE LOOKUP TO LOG IT.</p><p class="hint">BACK: RETURN</p>`,
     a: () => go('dex', S.backCursor), b: () => go('dex', S.backCursor),
@@ -617,10 +622,12 @@ const screens = {
         `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
         row('LINEAGE', s.lineage && esc(s.lineage)) +
         thcRow +
-        row('LABEL', [l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · ')) +
+        row('YOUR LABEL', [l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · ')) +
+        row('YOUR RATING', l.feel && l.feel.toUpperCase()) +
         row('TERPENES', s.terpenes && esc(s.terpenes)) +
         row('FLAVOR', s.flavors && esc(s.flavors)) +
         row('REPORTED', s.effects && esc(s.effects)) +
+        `<div class="rule"></div><p class="new" style="margin-bottom:6px">PROFILE</p>` + profileRows(s, row) + `<div class="rule"></div>` +
         row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
         row('YOUR LANE', s.custom && S.profile.type) +
         row('COMMUNITY', s.community && [`${s.community.users} ${s.community.users === 1 ? 'USER' : 'USERS'}${s.community.states ? ` · ${s.community.states}` : ''}`,
@@ -629,9 +636,12 @@ const screens = {
         `<div class="rule"></div>` + (tip ? `<p class="sub">${esc(tip)}</p>` : '') +
         `<p class="sub">SCANNED ${l.n || 0}X · ${s.effects ? 'EFFECTS VARY BY PERSON AND BATCH. ' : ''}NOT MEDICAL ADVICE.</p>` +
         (s.lab ? `<p class="sub">LAB DATA: CANNLYTICS, CC BY 4.0.</p>` : '') +
-        `<p class="hint">OK: READ ALOUD · BACK: RETURN</p>`;
+        `<p class="hint">OK: READ ALOUD · ◀▶: RATE HOW IT HIT · BACK: RETURN</p>`;
     },
-    dir: (d) => { if (d === 'up' || d === 'down') lcd.scrollBy({ top: d === 'up' ? -70 : 70 }); },
+    dir: (d) => {
+      if (d === 'up' || d === 'down') lcd.scrollBy({ top: d === 'up' ? -70 : 70 });
+      else { speak(''); go('askFeel'); }
+    },
     a: () => speak(narration(S.entry, false)),
     b: () => { speak(''); go(S.back, S.backCursor); },
   },

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS reports (
   thc        REAL,                      -- THC % read off the label, if any
   type       TEXT,                      -- Indica / Sativa / Hybrid as printed on the label, if the user answered
   terp       TEXT,                      -- top terpene printed on the label, if the user answered
+  feel       TEXT,                      -- how the user says it hit them, if they rated it
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (key, device)
