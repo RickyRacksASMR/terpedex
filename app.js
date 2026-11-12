@@ -20,7 +20,7 @@ const S = {
   log: store.get('log', {}),
   voice: store.get('voice', true),
   entry: null, isNew: false, back: 'home', backCursor: 0,
-  tmpType: null, q: '', ocr: '', err: '', status: '',
+  tmpType: null, q: '', ocr: '', err: '', status: '', lastRead: '', thcSeen: null,
 };
 
 /* ---------- sound + voice ---------- */
@@ -52,6 +52,31 @@ function speak(text) {
 
 /* ---------- dex logic ---------- */
 const loggedCount = () => Object.keys(S.log).length;
+
+// Strains the user registers themselves when a label isn't in the reference index.
+const customNames = store.get('custom', []);
+function pushCustom(name) {
+  const s = {
+    id: `c${customNames.indexOf(name) + 1}`,
+    no: String(STRAINS.length + 1).padStart(3, '0'),
+    name, type: 'Unlisted', custom: true,
+    blurb: 'Registered from your own label. No reference data on file for this one yet.',
+    keys: [normName(name)],
+  };
+  STRAINS.push(s);
+  return s;
+}
+customNames.forEach(pushCustom);
+
+function addCustom(raw) {
+  const key = normName(raw);
+  const existing = STRAINS.find((s) => s.keys.includes(key));
+  if (existing) return existing;
+  const name = raw.trim().replace(/\s+/g, ' ').slice(0, 40).toLowerCase().replace(/(^|[\s-])\S/g, (c) => c.toUpperCase());
+  customNames.push(name);
+  store.set('custom', customNames);
+  return pushCustom(name);
+}
 
 function logStrain(id, thc) {
   const prev = S.log[id];
@@ -140,12 +165,18 @@ function laneTip(s) {
     case 'EDIBLES':
       return 'As an edible, effects can take up to two hours to arrive and last much longer.' + (rookie ? ' Start low and wait before taking more.' : '');
     default:
+      if (!s.thc) return rookie ? 'Start low and go slow.' : '';
       return `Flower typically tests between ${s.thc[0]} and ${s.thc[1]} percent THC.` + (rookie ? ' Start low and go slow.' : '');
   }
 }
 
 function narration(s, isNew) {
-  return `${isNew ? 'New strain registered. ' : ''}${s.name}. Entry number ${s.id}. ${s.type}. ${s.blurb} ` +
+  if (s.custom) {
+    const thc = S.log[s.id]?.thc;
+    return `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. ` +
+      `This one is not in the reference index yet. ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
+  }
+  return`${isNew ? 'New strain registered. ' : ''}${s.name}. Entry number ${s.id}. ${s.type}. ${s.blurb} ` +
     `Lineage: ${s.lineage.replace(/ x /g, ' crossed with ').replace(/#/g, 'number ')}. ` +
     `Dominant terpenes: ${s.terpenes}. ${laneTip(s)}`;
 }
@@ -162,10 +193,14 @@ async function startCamera() {
   S.status = 'STARTING CAMERA...';
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('no camera api');
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
     if (S.screen !== 'scan') return stopCamera();
     S.status = '';
     render();
+    liveScan();
   } catch {
     stream = null;
     S.status = 'NO CAMERA FOUND';
@@ -188,13 +223,111 @@ function loadOCR() {
   });
 }
 
+// One long-lived text reader, set up for scattered label text rather than paragraphs.
+let workerP = null;
+function getWorker() {
+  if (!workerP) {
+    workerP = loadOCR().then(async () => {
+      const w = await Tesseract.createWorker('eng');
+      await w.setParameters({ tessedit_pageseg_mode: '11' });
+      return w;
+    }).catch((e) => { workerP = null; throw e; });
+  }
+  return workerP;
+}
+
+// Greyscale, stretch the contrast and resize so letters are a readable size.
+// `invert` flips light-on-dark labels, which the reader handles badly otherwise.
+function prep(src, invert) {
+  const scale = Math.min(2, 1600 / src.width);
+  const c = document.createElement('canvas');
+  c.width = Math.round(src.width * scale); c.height = Math.round(src.height * scale);
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(src, 0, 0, c.width, c.height);
+  const im = x.getImageData(0, 0, c.width, c.height), d = im.data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    d[i] = g; hist[g]++;
+  }
+  // Clip only a sliver at each end: label text can be a tiny share of the pixels.
+  const cut = (d.length / 4) * 0.002;
+  let lo = 0, hi = 255, acc = 0;
+  for (; lo < 255; lo++) { acc += hist[lo]; if (acc > cut) break; }
+  acc = 0;
+  for (; hi > 0; hi--) { acc += hist[hi]; if (acc > cut) break; }
+  if (hi - lo < 40) { lo = 0; hi = 255; }
+  const range = hi - lo;
+  for (let i = 0; i < d.length; i += 4) {
+    let g = Math.max(0, Math.min(255, ((d[i] - lo) * 255) / range));
+    if (invert) g = 255 - g;
+    d[i] = d[i + 1] = d[i + 2] = g;
+  }
+  x.putImageData(im, 0, 0);
+  return c;
+}
+
+// Grab just the part of the camera frame that sits inside the on-screen box.
+function grab(v) {
+  const vw = v.videoWidth, vh = v.videoHeight, box = 4 / 3;
+  let w = vw, h = vh;
+  if (vw / vh > box) w = vh * box; else h = vw / box;
+  const x0 = (vw - w) / 2 + w * 0.08, y0 = (vh - h) / 2 + h * 0.08;
+  const c = document.createElement('canvas');
+  c.width = Math.round(w * 0.84); c.height = Math.round(h * 0.84);
+  c.getContext('2d').drawImage(v, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+  return c;
+}
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const scanStatus = (t) => { const el = $('#scanStatus'); if (el) el.textContent = t; };
+
+// Keep reading frames until a strain name shows up, so the user can just move the label around.
+let scanRun = 0;
+async function liveScan() {
+  const run = ++scanRun;
+  const live = () => S.screen === 'scan' && run === scanRun;
+  let pass = 0;
+  scanStatus('LOADING TEXT READER...');
+  while (live()) {
+    const v = lcd.querySelector('video');
+    if (!v || !v.videoWidth) { await wait(300); continue; }
+    try {
+      const w = await getWorker();
+      if (!live()) return;
+      const { data } = await w.recognize(prep(grab(v), pass++ % 2 === 1));
+      if (!live()) return;
+      const text = data.text || '';
+      S.thcSeen = parseThc(text) ?? S.thcSeen;
+      const words = text.replace(/[^A-Za-z0-9#%. ]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (words.length > 3) S.lastRead = words;
+      if (findStrain(text)) return handleText(text);
+      scanStatus(words.length > 3 ? `READING: ${words.slice(0, 60).toUpperCase()}` : 'LOOKING FOR A STRAIN NAME...');
+    } catch (e) {
+      scanStatus(e.message || 'SCAN ERROR');
+      await wait(1500);
+    }
+    await wait(120);
+  }
+}
+
 async function analyze(source) {
   go('analyzing');
   try {
-    await loadOCR();
-    const r = await Tesseract.recognize(source, 'eng');
-    if (S.screen !== 'analyzing') return;
-    handleText(r.data.text || '');
+    const bmp = await createImageBitmap(source);
+    const c = document.createElement('canvas');
+    c.width = bmp.width; c.height = bmp.height;
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    const w = await getWorker();
+    let text = '';
+    for (const invert of [false, true]) {
+      const { data } = await w.recognize(prep(c, invert));
+      if (S.screen !== 'analyzing') return;
+      text += '\n' + (data.text || '');
+      if (findStrain(text)) break;
+    }
+    handleText(text);
   } catch (e) {
     S.ocr = ''; S.err = e.message || 'SCAN FAILED';
     go('nomatch');
@@ -205,18 +338,9 @@ function handleText(text) {
   S.ocr = text.trim(); S.err = '';
   const s = findStrain(text);
   if (!s) { go('nomatch'); speak('Unknown specimen. No match in the index.'); return; }
-  const isNew = logStrain(s.id, parseThc(text));
+  const isNew = logStrain(s.id, parseThc(text) ?? S.thcSeen);
   beep(1320, 120);
   openEntry(s, isNew, 'home');
-}
-
-function capture() {
-  const v = lcd.querySelector('video');
-  if (!v || !v.videoWidth) return;
-  const c = document.createElement('canvas');
-  c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext('2d').drawImage(v, 0, 0);
-  analyze(c);
 }
 
 $('#file').addEventListener('change', (e) => {
@@ -260,6 +384,7 @@ const screens = {
     b: () => go('type'),
   },
   home: {
+    enter: () => { S.thcSeen = null; },
     count: 5,
     render: () => `<h1>MAIN MENU</h1><p class="sub">LOGGED ${loggedCount()}/${STRAINS.length} · ${S.profile.type} · ${S.profile.level}</p><div class="rule"></div>` +
       menu(['STRAIN INDEX', 'SCAN A LABEL', 'LOOKUP BY NAME', 'CHANGE PROFILE', `VOICE: ${S.voice ? 'ON' : 'OFF'}`]),
@@ -282,6 +407,15 @@ const screens = {
   entry: {
     render: () => {
       const s = S.entry, l = S.log[s.id] || {};
+      if (s.custom) {
+        return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
+          `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">UNLISTED</span></div></div>` +
+          `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
+          (l.thc != null ? `<div class="row"><b>LABEL</b><span>${l.thc}% THC</span></div>` : '') +
+          `<div class="row"><b>YOUR LANE</b><span>${S.profile.type}</span></div>` +
+          `<div class="rule"></div><p class="sub">${esc(laneTip(s))}</p>` +
+          `<p class="sub">SCANNED ${l.n || 0}X · NOT MEDICAL ADVICE.</p><p class="hint">OK: READ ALOUD · BACK: RETURN</p>`;
+      }
       const lo = (s.thc[0] / 35) * 100, hi = (s.thc[1] / 35) * 100;
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
         `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${s.type.toUpperCase()}</span></div></div>` +
@@ -301,14 +435,19 @@ const screens = {
     b: () => { speak(''); go(S.back, S.backCursor); },
   },
   scan: {
-    enter: () => startCamera(),
-    leave: () => stopCamera(),
+    enter: () => { S.lastRead = ''; S.thcSeen = null; startCamera(); },
+    leave: () => { scanRun++; stopCamera(); },
     render: () => `<h1>SCAN A LABEL</h1><div class="viewfinder">` +
       (stream ? `<video autoplay playsinline muted></video><div class="reticle"></div>` : `<div class="nocam">${S.status}</div>`) +
-      `</div><p class="hint">${stream ? 'FILL THE BOX WITH THE STRAIN NAME.<br>OK:CAPTURE · ' : ''}◀▶: USE A PHOTO · BACK: RETURN</p>`,
+      `</div>` + (stream ? `<p id="scanStatus" class="sub" style="margin-top:8px;min-height:2.2em">LOADING TEXT READER...</p>` : '') +
+      `<p class="hint">${stream ? 'HOLD THE STRAIN NAME INSIDE THE BOX. IT SCANS ON ITS OWN.<br>OK: NOT FINDING IT · ' : 'OK / '}◀▶: USE A PHOTO · BACK: RETURN</p>`,
     after: () => { const v = lcd.querySelector('video'); if (v && stream) v.srcObject = stream; },
     dir: (d) => { if (d === 'left' || d === 'right') $('#file').click(); },
-    a: () => (stream ? capture() : $('#file').click()),
+    a: () => {
+      if (!stream) return $('#file').click();
+      S.ocr = S.lastRead || ''; S.err = S.ocr ? 'THAT NAME IS NOT IN THE INDEX YET.' : 'COULD NOT READ THE LABEL.';
+      go('nomatch');
+    },
     b: () => go('home'),
   },
   analyzing: {
@@ -319,7 +458,7 @@ const screens = {
     count: 3,
     render: () => `<h1>UNKNOWN SPECIMEN</h1><p>${esc(S.err || 'NO MATCH IN THE INDEX.')}</p>` +
       (S.ocr ? `<p class="sub">LABEL READ: "${esc(S.ocr.replace(/\s+/g, ' ').slice(0, 90))}"</p>` : '') +
-      menu(['TRY AGAIN', 'LOOKUP BY NAME', 'MAIN MENU']),
+      menu(['TRY AGAIN', 'TYPE THE NAME TO ADD IT', 'MAIN MENU']),
     a: (i) => go(['scan', 'lookup', 'home'][i]),
     b: () => go('home'),
   },
@@ -337,9 +476,15 @@ const screens = {
       const hits = searchStrains(S.q);
       $('#lk').innerHTML = hits.length
         ? menu(hits.map((s) => `<span class="no">No.${s.no}</span>${esc(s.name.toUpperCase())}`))
-        : `<p class="sub">${S.q ? 'NO MATCH YET.' : `${STRAINS.length} STRAINS ON FILE.`}</p>`;
+        : `<p class="sub">${S.q.trim().length >= 3 ? `NOT IN THE INDEX. PRESS OK TO ADD "${esc(S.q.trim().toUpperCase())}" AS A NEW ENTRY.` : `${STRAINS.length} STRAINS ON FILE.`}</p>`;
     },
-    a: (i) => { const s = searchStrains(S.q)[i]; if (s) { const isNew = logStrain(s.id); beep(1320, 120); openEntry(s, isNew, 'home'); } },
+    a: (i) => {
+      const s = searchStrains(S.q)[i] || (S.q.trim().length >= 3 ? addCustom(S.q) : null);
+      if (!s) return;
+      const isNew = logStrain(s.id, S.thcSeen);
+      beep(1320, 120);
+      openEntry(s, isNew, 'home');
+    },
     b: () => go('home'),
   },
 };
