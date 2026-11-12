@@ -68,7 +68,7 @@ if (typeof LAB !== 'undefined') {
     const known = byKey.get(key);
     if (known) { known.lab = lab; continue; }
     const s = {
-      id: `L:${key}`, name, type: type || 'Lab-tested', fromLab: true, lab,
+      id: `L:${key}`, name, type: type || 'Lab-tested', fromLab: true, strict: true, lab,
       thc: [lo, hi], terpenes: top,
       blurb: `Measured in ${n} public lab tests of flower. No lineage or effect notes on file yet.`,
       keys: [key],
@@ -77,7 +77,68 @@ if (typeof LAB !== 'undefined') {
     byKey.set(key, s);
   }
 }
+
+// Strains other Terpedex users have reported, from the shared database. These are
+// reports, not verified facts, so every entry says how many people logged it and where.
+const API = location.hostname === 'localhost' ? 'http://localhost:8799' : 'https://terpedex-api.rekigo.workers.dev';
+const communityBlurb = (c) => `Reported by ${c.users} Terpedex ${c.users === 1 ? 'user' : 'users'}${c.states ? ` in ${c.states}` : ''}. ` +
+  (c.users < 2 ? 'Unconfirmed: only one person has logged it so far.' : 'Community entry, not lab verified.');
+function applyCommunity(list) {
+  for (const c of list) {
+    const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {} };
+    const known = byKey.get(c.key);
+    if (known) {
+      known.community = info;
+      if (known.shared) known.blurb = communityBlurb(info);
+      continue;
+    }
+    const s = {
+      id: `U:${c.key}`, no: String(STRAINS.length + 1).padStart(4, '0'), name: c.name, type: 'Community',
+      shared: true, strict: true, community: info, blurb: communityBlurb(info), keys: [c.key],
+    };
+    STRAINS.push(s);
+    byKey.set(c.key, s);
+  }
+}
+applyCommunity(store.get('community', []));
 STRAINS.forEach((s, i) => { s.no = String(i + 1).padStart(4, '0'); });
+
+function deviceId() {
+  let id = store.get('device', null);
+  if (!id) { id = crypto.randomUUID(); store.set('device', id); }
+  return id;
+}
+
+async function syncCommunity() {
+  if (!API) return;
+  try {
+    const r = await fetch(`${API}/strains`);
+    if (!r.ok) return;
+    const { strains } = await r.json();
+    store.set('community', strains);
+    applyCommunity(strains);
+    if (S.screen === 'home' || S.screen === 'dex') render();
+  } catch { /* offline: keep the cached copy */ }
+}
+
+// Tell the shared database this device has this strain. Sends the strain name, the
+// user's lane, the label THC and a random device id; nothing that identifies a person.
+async function reportStrain(s, thc) {
+  if (!API || !S.profile) return;
+  try {
+    const r = await fetch(`${API}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: s.name, device: deviceId(), lane: S.profile.type, thc: thc ?? null }),
+    });
+    if (!r.ok) return;
+    const { strain } = await r.json();
+    if (!strain) return;
+    applyCommunity([strain]);
+    store.set('community', [...store.get('community', []).filter((c) => c.key !== strain.key), strain]);
+    if (S.screen === 'entry' && S.entry === s) render();
+  } catch { /* offline: the strain is still logged on this device */ }
+}
 
 // Strains the user registers themselves when a label isn't in the reference index.
 const customNames = store.get('custom', []);
@@ -114,6 +175,8 @@ function logStrain(id, thc) {
   const prev = S.log[id];
   S.log[id] = { first: prev?.first || Date.now(), n: (prev?.n || 0) + 1, thc: thc ?? prev?.thc ?? null };
   store.set('log', S.log);
+  const s = STRAINS.find((x) => x.id === id);
+  if (s) reportStrain(s, thc);
   return !prev;
 }
 
@@ -146,9 +209,9 @@ function findStrain(text) {
   for (const s of STRAINS) {
     for (const key of s.keys) {
       // Lab-sourced names include short or everyday words, so hold them to a stricter bar.
-      if (s.fromLab && (LABEL_WORDS.has(key) || (key.length < 6 && !key.includes(' ')))) continue;
+      if (s.strict && (LABEL_WORDS.has(key) || (key.length < 6 && !key.includes(' ')))) continue;
       if (padded.includes(` ${key} `)) { offer(s, 1000 + key.length); continue; }
-      if (key.length < (s.fromLab ? 9 : 6)) continue;
+      if (key.length < (s.strict ? 9 : 6)) continue;
       const n = key.split(' ').length;
       const allowed = Math.floor(key.length / 6);
       for (let i = 0; i + n <= words.length; i++) {
@@ -220,7 +283,7 @@ function laneTip(s) {
     case 'EDIBLES':
       return 'As an edible, effects can take up to two hours to arrive and last much longer.' + (rookie ? ' Start low and wait before taking more.' : '');
     default:
-      if (!s.thc) return rookie ? 'Start low and go slow.' : '';
+      if (!s.thc) return rookie ? 'Start low and go slow.' : 'https://terpedex-api.rekigo.workers.dev';
       return `Flower typically tests between ${s.thc[0]} and ${s.thc[1]} percent THC.` + (rookie ? ' Start low and go slow.' : '');
   }
 }
@@ -232,6 +295,10 @@ function narration(s, isNew) {
       `This one is not in the reference index yet. ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
   }
   const intro = `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. `;
+  if (s.shared) {
+    const thc = S.log[s.id]?.thc;
+    return intro + `${s.blurb} ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
+  }
   if (s.fromLab) {
     return intro + (s.type !== 'Lab-tested' ? `${s.type}. ` : '') +
       `Measured in ${s.lab.n} public lab tests. THC ran from ${s.thc[0]} to ${s.thc[1]} percent, with a median of ${s.lab.med}. ` +
@@ -422,7 +489,7 @@ const menu = (items) => `<ul class="menu">${items.map((l, i) => `<li data-i="${i
 
 const screens = {
   boot: {
-    render: () => `<div class="logo">TERPEDEX</div><p class="center sub">STRAIN INDEX UNIT v0.1</p><p class="center blink" style="margin-top:28px">PRESS OK</p>`,
+    render: () => `<div class="logo">TERPEDEX</div><p class="center sub">STRAIN INDEX UNIT v0.2</p>${API ? '<p class="center sub">COMMUNITY INDEX: ONLINE</p>' : ''}<p class="center blink" style="margin-top:28px">PRESS OK</p>`,
     a: () => go(!S.ageOk ? 'age' : S.profile ? 'home' : 'type'),
   },
   age: {
@@ -491,7 +558,7 @@ const screens = {
       }
       const tip = laneTip(s);
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
-        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${esc(s.type.toUpperCase())}</span></div></div>` +
+        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${s.shared && s.community.users < 2 ? 'UNCONFIRMED' : esc(s.type.toUpperCase())}</span></div></div>` +
         `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
         row('LINEAGE', s.lineage && esc(s.lineage)) +
         thcRow +
@@ -501,6 +568,8 @@ const screens = {
         row('REPORTED', s.effects && esc(s.effects)) +
         row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
         row('YOUR LANE', s.custom && S.profile.type) +
+        row('COMMUNITY', s.community && [`${s.community.users} ${s.community.users === 1 ? 'USER' : 'USERS'}${s.community.states ? ` · ${s.community.states}` : ''}`,
+          ...Object.entries(s.community.thc).map(([lane, t]) => `${lane} LABELS ${t.lo === t.hi ? t.lo : `${t.lo}–${t.hi}`}% THC (${t.n})`)].join('<br>')) +
         `<div class="rule"></div>` + (tip ? `<p class="sub">${esc(tip)}</p>` : '') +
         `<p class="sub">SCANNED ${l.n || 0}X · ${s.effects ? 'EFFECTS VARY BY PERSON AND BATCH. ' : ''}NOT MEDICAL ADVICE.</p>` +
         (s.lab ? `<p class="sub">LAB DATA: CANNLYTICS, CC BY 4.0.</p>` : '') +
@@ -644,3 +713,4 @@ document.addEventListener('keydown', (e) => {
 
 if ('speechSynthesis' in window) speechSynthesis.getVoices();
 render();
+syncCommunity();
