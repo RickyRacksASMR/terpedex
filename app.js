@@ -1,4 +1,4 @@
-/* Canadex prototype: retro strain index. No build step, no backend. */
+/* Terpedex prototype: retro strain index. No build step, no backend. */
 
 const $ = (s) => document.querySelector(s);
 const lcd = $('#lcd');
@@ -21,6 +21,7 @@ const S = {
   voice: store.get('voice', true),
   entry: null, isNew: false, back: 'home', backCursor: 0,
   tmpType: null, q: '', ocr: '', err: '', status: '', lastRead: '', thcSeen: null,
+  cands: {}, dexAll: false,
 };
 
 /* ---------- sound + voice ---------- */
@@ -52,30 +53,61 @@ function speak(text) {
 
 /* ---------- dex logic ---------- */
 const loggedCount = () => Object.keys(S.log).length;
+const dexList = () => (S.dexAll ? STRAINS : STRAINS.filter((s) => S.log[s.id]));
+
+// Every strain by each of its names, for exact lookups.
+const byKey = new Map();
+for (const s of STRAINS) for (const k of s.keys) byKey.set(k, s);
+
+// Strains measured in public lab tests (labdata.js). A lab row that matches a
+// hand-written entry adds its numbers to that entry; the rest become entries of their own.
+if (typeof LAB !== 'undefined') {
+  for (const [name, n, lo, med, hi, terp, top, type, states] of LAB) {
+    const key = normName(name);
+    const lab = { n, med, terp, states: states.replace(/,/g, ', ') };
+    const known = byKey.get(key);
+    if (known) { known.lab = lab; continue; }
+    const s = {
+      id: `L:${key}`, name, type: type || 'Lab-tested', fromLab: true, lab,
+      thc: [lo, hi], terpenes: top,
+      blurb: `Measured in ${n} public lab tests of flower. No lineage or effect notes on file yet.`,
+      keys: [key],
+    };
+    STRAINS.push(s);
+    byKey.set(key, s);
+  }
+}
+STRAINS.forEach((s, i) => { s.no = String(i + 1).padStart(4, '0'); });
 
 // Strains the user registers themselves when a label isn't in the reference index.
 const customNames = store.get('custom', []);
-function pushCustom(name) {
+function pushCustom(name, i) {
+  const id = `c${i + 1}`, key = normName(name);
+  const known = byKey.get(key);
+  if (known) {
+    // The index has since gained this strain: move the user's log onto the real entry.
+    if (S.log[id]) { S.log[known.id] = S.log[known.id] || S.log[id]; delete S.log[id]; store.set('log', S.log); }
+    return known;
+  }
   const s = {
-    id: `c${customNames.indexOf(name) + 1}`,
-    no: String(STRAINS.length + 1).padStart(3, '0'),
+    id, no: String(STRAINS.length + 1).padStart(4, '0'),
     name, type: 'Unlisted', custom: true,
     blurb: 'Registered from your own label. No reference data on file for this one yet.',
-    keys: [normName(name)],
+    keys: [key],
   };
   STRAINS.push(s);
+  byKey.set(key, s);
   return s;
 }
 customNames.forEach(pushCustom);
 
 function addCustom(raw) {
-  const key = normName(raw);
-  const existing = STRAINS.find((s) => s.keys.includes(key));
+  const existing = byKey.get(normName(raw));
   if (existing) return existing;
   const name = raw.trim().replace(/\s+/g, ' ').slice(0, 40).toLowerCase().replace(/(^|[\s-])\S/g, (c) => c.toUpperCase());
   customNames.push(name);
   store.set('custom', customNames);
-  return pushCustom(name);
+  return pushCustom(name, customNames.length - 1);
 }
 
 function logStrain(id, thc) {
@@ -98,6 +130,11 @@ function lev(a, b) {
   return row[b.length];
 }
 
+// Words that show up on packaging and must never be taken for a strain name.
+const LABEL_WORDS = new Set(('CANNABIS MARIJUANA PRODUCT PRODUCTS WARNING GOVERNMENT CALIFORNIA HARVEST PACKAGED ORIGINAL RESERVE ' +
+  'ORGANIC EXOTIC CLASSIC SELECT TOTAL BATCH PREMIUM INDOOR OUTDOOR FLOWER CONCENTRATE EXTRACT ROSIN RESIN BADDER BUDDER ' +
+  'SAUCE DIAMONDS LIVE CURED SOLVENTLESS NATURAL QUALITY LIMITED EDITION SPECIAL CHILDREN LICENSE TESTED MANUFACTURED').split(' '));
+
 // Find the strain named in a blob of label text. Exact phrase wins, longest first;
 // otherwise allow a few OCR misreads on longer names.
 function findStrain(text) {
@@ -108,8 +145,10 @@ function findStrain(text) {
   const offer = (s, score) => { if (!best || score > best.score) best = { s, score }; };
   for (const s of STRAINS) {
     for (const key of s.keys) {
+      // Lab-sourced names include short or everyday words, so hold them to a stricter bar.
+      if (s.fromLab && (LABEL_WORDS.has(key) || (key.length < 6 && !key.includes(' ')))) continue;
       if (padded.includes(` ${key} `)) { offer(s, 1000 + key.length); continue; }
-      if (key.length < 6) continue;
+      if (key.length < (s.fromLab ? 9 : 6)) continue;
       const n = key.split(' ').length;
       const allowed = Math.floor(key.length / 6);
       for (let i = 0; i + n <= words.length; i++) {
@@ -131,10 +170,26 @@ function parseThc(text) {
 function searchStrains(q) {
   const n = normName(q);
   if (!n) return [];
-  const hits = STRAINS.filter((s) => s.keys.some((k) => k.includes(n)));
+  // Exact name first, then names that start with the query, then the most-tested.
+  const rank = (s) => (s.keys.includes(n) ? 0 : s.keys.some((k) => k.startsWith(n)) ? 1 : 2);
+  const hits = STRAINS.filter((s) => s.keys.some((k) => k.includes(n)))
+    .sort((a, b) => rank(a) - rank(b) || (b.lab?.n || 0) - (a.lab?.n || 0));
   if (!hits.length) { const f = findStrain(q); if (f) hits.push(f); }
   return hits.slice(0, 6);
 }
+
+// Lines of label text that could be the strain name, counted across camera frames
+// so the user can pick the name instead of typing it.
+const NOT_A_NAME = /THC|CBD|TOTAL|BATCH|NET ?WT|WEIGHT|LIC|PACKAGED|HARVEST|WARNING|GOVERNMENT|MFG|EXP|TESTED|CANNABI|TERPENE|INGREDIENT|KEEP OUT|WWW|COM$|\d{3}/;
+function harvest(text) {
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/[^A-Za-z0-9#'& ]+/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase();
+    const letters = line.replace(/[^A-Z]/g, '').length;
+    if (line.length < 4 || line.length > 30 || letters < 4 || letters / line.length < 0.7 || NOT_A_NAME.test(line)) continue;
+    S.cands[line] = (S.cands[line] || 0) + 1;
+  }
+}
+const candidates = () => Object.entries(S.cands).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([line]) => line);
 
 function sprite(s) {
   let h = 2166136261;
@@ -176,9 +231,16 @@ function narration(s, isNew) {
     return `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. ` +
       `This one is not in the reference index yet. ${thc != null ? `Your label reads ${thc} percent THC. ` : ''}${laneTip(s)}`;
   }
-  return`${isNew ? 'New strain registered. ' : ''}${s.name}. Entry number ${s.id}. ${s.type}. ${s.blurb} ` +
+  const intro = `${isNew ? 'New strain registered. ' : ''}${s.name.replace(/#/g, 'number ')}. Entry number ${Number(s.no)}. `;
+  if (s.fromLab) {
+    return intro + (s.type !== 'Lab-tested' ? `${s.type}. ` : '') +
+      `Measured in ${s.lab.n} public lab tests. THC ran from ${s.thc[0]} to ${s.thc[1]} percent, with a median of ${s.lab.med}. ` +
+      (s.terpenes ? `Dominant terpenes: ${s.terpenes}. ` : '') + laneTip(s);
+  }
+  return intro + `${s.type}. ${s.blurb} ` +
     `Lineage: ${s.lineage.replace(/ x /g, ' crossed with ').replace(/#/g, 'number ')}. ` +
-    `Dominant terpenes: ${s.terpenes}. ${laneTip(s)}`;
+    `Dominant terpenes: ${s.terpenes}. ` +
+    (s.lab ? `In ${s.lab.n} public lab tests, the median THC was ${s.lab.med} percent. ` : '') + laneTip(s);
 }
 
 function openEntry(s, isNew, back, backCursor = 0) {
@@ -303,6 +365,7 @@ async function liveScan() {
       const words = text.replace(/[^A-Za-z0-9#%. ]+/g, ' ').replace(/\s+/g, ' ').trim();
       if (words.length > 3) S.lastRead = words;
       if (findStrain(text)) return handleText(text);
+      harvest(text);
       scanStatus(words.length > 3 ? `READING: ${words.slice(0, 60).toUpperCase()}` : 'LOOKING FOR A STRAIN NAME...');
     } catch (e) {
       scanStatus(e.message || 'SCAN ERROR');
@@ -337,7 +400,12 @@ async function analyze(source) {
 function handleText(text) {
   S.ocr = text.trim(); S.err = '';
   const s = findStrain(text);
-  if (!s) { go('nomatch'); speak('Unknown specimen. No match in the index.'); return; }
+  if (!s) {
+    harvest(text);
+    S.thcSeen = parseThc(text) ?? S.thcSeen;
+    go('nomatch'); speak('Unknown specimen. No match in the index.');
+    return;
+  }
   const isNew = logStrain(s.id, parseThc(text) ?? S.thcSeen);
   beep(1320, 120);
   openEntry(s, isNew, 'home');
@@ -354,7 +422,7 @@ const menu = (items) => `<ul class="menu">${items.map((l, i) => `<li data-i="${i
 
 const screens = {
   boot: {
-    render: () => `<div class="logo">CANADEX</div><p class="center sub">STRAIN INDEX UNIT v0.1</p><p class="center blink" style="margin-top:28px">PRESS OK</p>`,
+    render: () => `<div class="logo">TERPEDEX</div><p class="center sub">STRAIN INDEX UNIT v0.1</p><p class="center blink" style="margin-top:28px">PRESS OK</p>`,
     a: () => go(!S.ageOk ? 'age' : S.profile ? 'home' : 'type'),
   },
   age: {
@@ -363,7 +431,7 @@ const screens = {
     a: (i) => { if (i === 0) { S.ageOk = true; store.set('age', true); go(S.profile ? 'home' : 'type'); } else go('denied'); },
   },
   denied: {
-    render: () => `<h1>ACCESS DENIED</h1><p>CANADEX IS FOR ADULTS 21 AND OVER.</p><p class="hint">BACK: RETURN</p>`,
+    render: () => `<h1>ACCESS DENIED</h1><p>TERPEDEX IS FOR ADULTS 21 AND OVER.</p><p class="hint">BACK: RETURN</p>`,
     a: () => go('age'), b: () => go('age'),
   },
   type: {
@@ -379,7 +447,7 @@ const screens = {
       S.profile = { type: S.tmpType, level: LEVELS[i] };
       store.set('profile', S.profile);
       go('home');
-      speak(`Profile set. ${S.profile.type.toLowerCase()}, ${S.profile.level.toLowerCase()}. Welcome to Canadex. Scan a label to register your first strain.`);
+      speak(`Profile set. ${S.profile.type.toLowerCase()}, ${S.profile.level.toLowerCase()}. Welcome to Terpedex. Scan a label to register your first strain.`);
     },
     b: () => go('type'),
   },
@@ -391,13 +459,21 @@ const screens = {
     a: (i) => [() => go('dex'), () => go('scan'), () => go('lookup'), () => go('type'), toggleVoice][i](),
   },
   dex: {
-    count: STRAINS.length,
-    render: () => `<h1>STRAIN INDEX</h1><p class="sub">LOGGED ${loggedCount()}/${STRAINS.length}</p><ul class="menu">` +
-      STRAINS.map((s, i) => {
-        const got = !!S.log[s.id];
-        return `<li data-i="${i}" class="${i === S.cursor ? 'sel' : ''} ${got ? '' : 'locked'}"><span class="no">No.${s.no}</span>${got ? esc(s.name.toUpperCase()) + '<span class="tick">●</span>' : '- - - - - -'}</li>`;
-      }).join('') + '</ul>',
-    a: (i) => { const s = STRAINS[i]; if (S.log[s.id]) openEntry(s, false, 'dex', i); else { S.backCursor = i; go('locked'); } },
+    count: () => dexList().length,
+    render: () => {
+      const list = dexList();
+      // The full index runs to thousands of entries, so only draw the ones near the cursor.
+      const from = Math.max(0, S.cursor - 15), to = Math.min(list.length, S.cursor + 25);
+      let rows = '';
+      for (let i = from; i < to; i++) {
+        const s = list[i], got = !!S.log[s.id];
+        rows += `<li data-i="${i}" class="${i === S.cursor ? 'sel' : ''} ${got ? '' : 'locked'}"><span class="no">No.${s.no}</span>${got ? esc(s.name.toUpperCase()) + '<span class="tick">●</span>' : '- - - - - -'}</li>`;
+      }
+      return `<h1>${S.dexAll ? 'FULL INDEX' : 'MY STRAINS'}</h1><p class="sub">LOGGED ${loggedCount()}/${STRAINS.length} · ◀▶: ${S.dexAll ? 'MY STRAINS' : 'FULL INDEX'}</p>` +
+        (list.length ? `<ul class="menu">${rows}</ul>` : `<p>NOTHING REGISTERED YET.</p><p>SCAN A LABEL OR USE LOOKUP TO LOG YOUR FIRST STRAIN.</p>`);
+    },
+    dir: (d) => { if (d === 'left' || d === 'right') { S.dexAll = !S.dexAll; S.cursor = 0; lcd.scrollTop = 0; render(); } },
+    a: (i) => { const s = dexList()[i]; if (!s) return; if (S.log[s.id]) openEntry(s, false, 'dex', i); else { S.backCursor = i; go('locked'); } },
     b: () => go('home'),
   },
   locked: {
@@ -407,35 +483,35 @@ const screens = {
   entry: {
     render: () => {
       const s = S.entry, l = S.log[s.id] || {};
-      if (s.custom) {
-        return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
-          `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">UNLISTED</span></div></div>` +
-          `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
-          (l.thc != null ? `<div class="row"><b>LABEL</b><span>${l.thc}% THC</span></div>` : '') +
-          `<div class="row"><b>YOUR LANE</b><span>${S.profile.type}</span></div>` +
-          `<div class="rule"></div><p class="sub">${esc(laneTip(s))}</p>` +
-          `<p class="sub">SCANNED ${l.n || 0}X · NOT MEDICAL ADVICE.</p><p class="hint">OK: READ ALOUD · BACK: RETURN</p>`;
+      const row = (label, value) => (value ? `<div class="row"><b>${label}</b><span>${value}</span></div>` : '');
+      let thcRow = '';
+      if (s.thc) {
+        const lo = (s.thc[0] / 35) * 100, hi = (Math.min(35, s.thc[1]) / 35) * 100;
+        thcRow = `<div class="row"><b>THC</b><span style="flex:1">${s.thc[0]}–${s.thc[1]}% ${s.fromLab ? 'IN LAB TESTS' : 'TYPICAL'}<br><span class="bar"><i style="left:${lo}%;width:${Math.max(2, hi - lo)}%"></i></span></span></div>`;
       }
-      const lo = (s.thc[0] / 35) * 100, hi = (s.thc[1] / 35) * 100;
+      const tip = laneTip(s);
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
-        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${s.type.toUpperCase()}</span></div></div>` +
+        `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${esc(s.type.toUpperCase())}</span></div></div>` +
         `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
-        `<div class="row"><b>LINEAGE</b><span>${esc(s.lineage)}</span></div>` +
-        `<div class="row"><b>THC</b><span style="flex:1">${s.thc[0]}–${s.thc[1]}% TYPICAL<br><span class="bar"><i style="left:${lo}%;width:${hi - lo}%"></i></span></span></div>` +
-        (l.thc != null ? `<div class="row"><b>LABEL</b><span>${l.thc}% THC</span></div>` : '') +
-        `<div class="row"><b>TERPENES</b><span>${esc(s.terpenes)}</span></div>` +
-        `<div class="row"><b>FLAVOR</b><span>${esc(s.flavors)}</span></div>` +
-        `<div class="row"><b>REPORTED</b><span>${esc(s.effects)}</span></div>` +
-        `<div class="rule"></div><p class="sub">${esc(laneTip(s))}</p>` +
-        `<p class="sub">SCANNED ${l.n || 0}X · EFFECTS VARY BY PERSON AND BATCH. NOT MEDICAL ADVICE.</p>` +
-        `<p class="hint">OK:READ ALOUD · BACK: RETURN</p>`;
+        row('LINEAGE', s.lineage && esc(s.lineage)) +
+        thcRow +
+        row('LABEL', l.thc != null && `${l.thc}% THC`) +
+        row('TERPENES', s.terpenes && esc(s.terpenes)) +
+        row('FLAVOR', s.flavors && esc(s.flavors)) +
+        row('REPORTED', s.effects && esc(s.effects)) +
+        row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
+        row('YOUR LANE', s.custom && S.profile.type) +
+        `<div class="rule"></div>` + (tip ? `<p class="sub">${esc(tip)}</p>` : '') +
+        `<p class="sub">SCANNED ${l.n || 0}X · ${s.effects ? 'EFFECTS VARY BY PERSON AND BATCH. ' : ''}NOT MEDICAL ADVICE.</p>` +
+        (s.lab ? `<p class="sub">LAB DATA: CANNLYTICS, CC BY 4.0.</p>` : '') +
+        `<p class="hint">OK: READ ALOUD · BACK: RETURN</p>`;
     },
     dir: (d) => { if (d === 'up' || d === 'down') lcd.scrollBy({ top: d === 'up' ? -70 : 70 }); },
     a: () => speak(narration(S.entry, false)),
     b: () => { speak(''); go(S.back, S.backCursor); },
   },
   scan: {
-    enter: () => { S.lastRead = ''; S.thcSeen = null; startCamera(); },
+    enter: () => { S.lastRead = ''; S.thcSeen = null; S.cands = {}; startCamera(); },
     leave: () => { scanRun++; stopCamera(); },
     render: () => `<h1>SCAN A LABEL</h1><div class="viewfinder">` +
       (stream ? `<video autoplay playsinline muted></video><div class="reticle"></div>` : `<div class="nocam">${S.status}</div>`) +
@@ -455,11 +531,22 @@ const screens = {
     b: () => go('home'),
   },
   nomatch: {
-    count: 3,
-    render: () => `<h1>UNKNOWN SPECIMEN</h1><p>${esc(S.err || 'NO MATCH IN THE INDEX.')}</p>` +
-      (S.ocr ? `<p class="sub">LABEL READ: "${esc(S.ocr.replace(/\s+/g, ' ').slice(0, 90))}"</p>` : '') +
-      menu(['TRY AGAIN', 'TYPE THE NAME TO ADD IT', 'MAIN MENU']),
-    a: (i) => go(['scan', 'lookup', 'home'][i]),
+    count: () => candidates().length + 3,
+    render: () => {
+      const c = candidates();
+      return `<h1>UNKNOWN SPECIMEN</h1><p>${esc(S.err || 'NO MATCH IN THE INDEX.')}</p>` +
+        (c.length ? `<p class="sub">I READ THESE OFF THE LABEL. PICK THE STRAIN NAME TO REGISTER IT:</p>`
+          : S.ocr ? `<p class="sub">LABEL READ: "${esc(S.ocr.replace(/\s+/g, ' ').slice(0, 90))}"</p>` : '') +
+        menu([...c.map(esc), 'TYPE THE NAME INSTEAD', 'TRY AGAIN', 'MAIN MENU']);
+    },
+    a: (i) => {
+      const c = candidates();
+      if (i >= c.length) return go(['lookup', 'scan', 'home'][i - c.length]);
+      const s = addCustom(c[i]);
+      const isNew = logStrain(s.id, S.thcSeen);
+      beep(1320, 120);
+      openEntry(s, isNew, 'home');
+    },
     b: () => go('home'),
   },
   lookup: {
@@ -530,10 +617,6 @@ function press(btn) {
   if (n && (btn === 'up' || btn === 'down')) {
     S.cursor = (S.cursor + (btn === 'up' ? -1 : 1) + n) % n;
     return sc.soft ? sc.soft() : render();
-  }
-  if (n > 8 && (btn === 'left' || btn === 'right')) {
-    S.cursor = Math.max(0, Math.min(n - 1, S.cursor + (btn === 'left' ? -8 : 8)));
-    return render();
   }
   sc.dir?.(btn);
 }

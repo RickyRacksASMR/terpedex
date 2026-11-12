@@ -23,4 +23,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(data);
   });
-}).listen(PORT, () => console.log(`Canadex running at http://localhost:${PORT}`));
+}).listen(PORT, () => console.log(`Terpedex running at http://localhost:${PORT}`));
