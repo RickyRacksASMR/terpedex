@@ -24,3 +24,18 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX IF NOT EXISTS reports_device ON reports (device, updated_at);
 CREATE INDEX IF NOT EXISTS strains_creator ON strains (created_by, created_at);
+
+-- Reference notes for a strain, written once by a Workers AI model and reused by everyone.
+-- `known` = 0 records that the model did not recognise the name (data is then "null").
+CREATE TABLE IF NOT EXISTS notes (
+  key        TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  known      INTEGER NOT NULL,
+  data       TEXT NOT NULL,             -- JSON: type, leaning, lineage, effects, overall, flavors, summary
+  model      TEXT NOT NULL,
+  tokens_in  INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notes_created ON notes (created_at);

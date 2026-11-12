@@ -11,3 +11,8 @@ binding = "DB"
 database_name = "terpedex"
 # Created with `npx wrangler d1 create terpedex`.
 database_id = "90a4e60c-03d8-421d-96e1-12c65688f48e"
+
+# Workers AI, used to write strain reference notes. Capped in src/index.js.
+[ai]
+binding = "AI"
+remote = true

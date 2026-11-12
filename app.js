@@ -83,6 +83,9 @@ if (typeof LAB !== 'undefined') {
 const API = location.hostname === 'localhost' ? 'http://localhost:8799' : 'https://terpedex-api.rekigo.workers.dev';
 const communityBlurb = (c) => `Reported by ${c.users} Terpedex ${c.users === 1 ? 'user' : 'users'}${c.states ? ` in ${c.states}` : ''}. ` +
   (c.users < 2 ? 'Unconfirmed: only one person has logged it so far.' : 'Community entry, not lab verified.');
+// Reference notes from the research step. Hand-written entries already have their own.
+function setNote(s, note) { if (!s.lineage) s.note = note; }
+
 function applyCommunity(list) {
   for (const c of list) {
     const info = { users: c.users, states: c.states.join(', '), thc: c.thc || {}, types: c.types || {}, terps: c.terps || {}, feels: c.feels || {} };
@@ -90,12 +93,14 @@ function applyCommunity(list) {
     if (known) {
       known.community = info;
       if (known.shared) known.blurb = communityBlurb(info);
+      if (c.note) setNote(known, c.note);
       continue;
     }
     const s = {
       id: `U:${c.key}`, no: String(STRAINS.length + 1).padStart(4, '0'), name: c.name, type: 'Community',
       shared: true, strict: true, community: info, blurb: communityBlurb(info), keys: [c.key],
     };
+    if (c.note) setNote(s, c.note);
     STRAINS.push(s);
     byKey.set(c.key, s);
   }
@@ -162,6 +167,35 @@ function pushCustom(name, i) {
 }
 customNames.forEach(pushCustom);
 
+// Notes this device has already fetched: an object per strain, or false for "nothing found".
+for (const [key, note] of Object.entries(store.get('notes', {}))) {
+  const s = byKey.get(key);
+  if (s) setNote(s, note);
+}
+
+// Look a strain up once. The server asks an AI model for well-established facts about the
+// name, saves the answer for every user, and answers "nothing found" when it isn't sure.
+const needsResearch = (s) => !!API && !s.lineage && s.note === undefined && !s.researchTried;
+async function research(s) {
+  s.researchTried = true;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 25000);
+  try {
+    const r = await fetch(`${API}/research`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: s.name, device: deviceId() }),
+      signal: ctl.signal,
+    });
+    if (!r.ok) return;   // daily limit or outage: leave it unanswered so a later visit retries
+    const { note } = await r.json();
+    setNote(s, note || false);
+    store.set('notes', { ...store.get('notes', {}), [s.keys[0]]: note || false });
+  } catch { /* offline or timed out */ } finally {
+    clearTimeout(timer);
+  }
+}
+
 function addCustom(raw) {
   const existing = byKey.get(normName(raw));
   if (existing) return existing;
@@ -196,10 +230,23 @@ function consensus(votes) {
   return { value, n, total, confirmed: n >= 2 && n / total >= 0.6 };
 }
 
-function register(s, thc) {
+let researchRun = 0;
+async function register(s, thc) {
   const isNew = logStrain(s.id, thc);
   beep(1320, 120);
-  if (!hasOwnType(s) && !S.log[s.id].asked) {
+  if (needsResearch(s)) {
+    const run = ++researchRun;
+    S.pending = { s, isNew, type: null };
+    go('researching');
+    await research(s);
+    if (S.screen !== 'researching' || run !== researchRun) return;
+  }
+  afterResearch(s, isNew);
+}
+
+// The label questions are the fallback: only ask when no reference turned anything up.
+function afterResearch(s, isNew) {
+  if (!hasOwnType(s) && !s.note && !S.log[s.id].asked) {
     S.pending = { s, isNew, type: null };
     return go('askType');
   }
@@ -331,7 +378,13 @@ function narration(s, isNew) {
   const thc = S.log[s.id]?.thc;
   const label = thc != null ? `Your label reads ${thc} percent THC. ` : '';
   let body;
-  if (s.custom) body = 'This one is not in the reference index yet. ';
+  if (s.note) {
+    const n = s.note;
+    body = (n.summary ? `${n.summary} ` : '') +
+      (n.lineage ? `Lineage: ${n.lineage.replace(/ x /gi, ' crossed with ').replace(/#/g, 'number ')}. ` : '') +
+      (n.leaning ? `Leaning: ${n.leaning}. ` : '') +
+      (s.fromLab ? `Measured in ${s.lab.n} public lab tests. ` : '');
+  } else if (s.custom) body = 'This one is not in the reference index yet. ';
   else if (s.shared) body = `${s.blurb} `;
   else if (s.fromLab) body = `Measured in ${s.lab.n} public lab tests. `;
   else body = `${s.type}. ${s.blurb} Lineage: ${s.lineage.replace(/ x /g, ' crossed with ').replace(/#/g, 'number ')}. `;
@@ -342,6 +395,8 @@ function openEntry(s, isNew, back, backCursor = 0) {
   S.entry = s; S.isNew = isNew; S.back = back; S.backCursor = backCursor;
   go('entry');
   speak(narration(s, isNew));
+  // An older entry that was never looked up: fetch its notes quietly and redraw.
+  if (needsResearch(s)) research(s).then(() => { if (S.screen === 'entry' && S.entry === s && s.note) render(); });
 }
 
 /* ---------- camera + OCR ---------- */
@@ -569,6 +624,10 @@ const screens = {
     a: (i) => { const s = dexList()[i]; if (!s) return; if (S.log[s.id]) openEntry(s, false, 'dex', i); else { S.backCursor = i; go('locked'); } },
     b: () => go('home'),
   },
+  researching: {
+    render: () => `<h1>SEARCHING</h1><p>${esc(S.pending.s.name.toUpperCase())}</p><p class="blink">CHECKING REFERENCE NOTES...</p><p class="hint">BACK: SKIP</p>`,
+    b: () => { researchRun++; afterResearch(S.pending.s, S.pending.isNew); },
+  },
   askType: {
     count: 4,
     render: () => `<h1>LABEL CHECK 1/2</h1><p>WHAT TYPE DOES THE LABEL SAY?</p><p class="sub">ANSWER ONLY FROM THE LABEL. IT HELPS CONFIRM THIS ENTRY FOR EVERYONE.</p>` +
@@ -615,18 +674,24 @@ const screens = {
       }
       const tip = laneTip(s);
       const ct = s.community && consensus(s.community.types), cp = s.community && consensus(s.community.terps);
-      const tag = hasOwnType(s) ? s.type : ct ? ct.value + (ct.confirmed ? '' : ' ?') : s.shared && s.community.users < 2 ? 'Unconfirmed' : s.type;
+      const note = s.note || {};
+      const pt = strainProfile(s).type;
+      const tag = hasOwnType(s) ? s.type : pt && !pt.guess ? pt.value + (/UNCONFIRMED/.test(pt.src) ? ' ?' : '') : s.shared && s.community.users < 2 ? 'Unconfirmed' : s.type;
+      const lineage = s.lineage || note.lineage, flavors = s.flavors || (note.flavors || []).join(', '), effects = s.effects || (note.effects || []).join(', ');
+      const blurb = !s.note ? s.blurb : s.fromLab ? `Measured in ${s.lab.n} public lab tests of flower.` : s.custom ? 'Registered from your own label.' : s.blurb;
       const vote = (label, c) => `${label}: ${c.value.toUpperCase()} · ${c.n} OF ${c.total} · ${c.confirmed ? 'CONFIRMED' : 'UNCONFIRMED'}`;
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
         `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${esc(tag.toUpperCase())}</span></div></div>` +
-        `<p>${esc(s.blurb)}</p><div class="rule"></div>` +
-        row('LINEAGE', s.lineage && esc(s.lineage)) +
+        (note.summary ? `<p>${esc(note.summary)}</p>` : '') + `<p${note.summary ? ' class="sub"' : ''}>${esc(blurb)}</p>` +
+        (s.note ? `<p class="sub">NOTES WRITTEN BY AI FROM GENERAL STRAIN KNOWLEDGE. NOT VERIFIED.</p>` : '') + `<div class="rule"></div>` +
+        row('LINEAGE', lineage && esc(lineage)) +
+        row('LEANING', note.leaning && esc(note.leaning.toUpperCase())) +
         thcRow +
         row('YOUR LABEL', [l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · ')) +
         row('YOUR RATING', l.feel && l.feel.toUpperCase()) +
         row('TERPENES', s.terpenes && esc(s.terpenes)) +
-        row('FLAVOR', s.flavors && esc(s.flavors)) +
-        row('REPORTED', s.effects && esc(s.effects)) +
+        row('FLAVOR', flavors && esc(flavors)) +
+        row('REPORTED', effects && esc(effects)) +
         `<div class="rule"></div><p class="new" style="margin-bottom:6px">PROFILE</p>` + profileRows(s, row) + `<div class="rule"></div>` +
         row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
         row('YOUR LANE', s.custom && S.profile.type) +

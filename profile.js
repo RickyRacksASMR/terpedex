@@ -62,6 +62,7 @@ function strainProfile(s) {
   const voted = consensus(c.types);
   if (hasOwnType(s)) p.type = { value: s.type, src: 'ON FILE' };
   else if (voted?.confirmed) p.type = { value: voted.value, src: `CONFIRMED BY ${voted.n} USERS` };
+  else if (s.note?.type) p.type = { value: s.note.type, src: 'AI REFERENCE NOTES' };
   else if (mine.type) p.type = { value: mine.type, src: 'YOUR LABEL' };
   else if (voted) p.type = { value: voted.value, src: 'ONE REPORT, UNCONFIRMED' };
   else {
@@ -79,7 +80,7 @@ function strainProfile(s) {
     if (terps.length) p.terpSrc = 'USER LABELS';
   }
   p.terpenes = terps;
-  p.aroma = s.flavors || [...new Set(terps.map((t) => TERPENE_INFO[t]?.aroma).filter(Boolean).join(', ').split(', '))].slice(0, 4).join(', ');
+  p.aroma = s.flavors || (s.note?.flavors || []).join(', ') || [...new Set(terps.map((t) => TERPENE_INFO[t]?.aroma).filter(Boolean).join(', ').split(', '))].slice(0, 4).join(', ');
 
   // ---- potency (flower lab numbers, else the hand-written range) ----
   const thc = s.lab?.med ?? (s.thc ? (s.thc[0] + s.thc[1]) / 2 : null);
@@ -96,10 +97,13 @@ function strainProfile(s) {
     terps.slice(0, 3).forEach((name, i) => { t += (TERPENE_INFO[name]?.lean || 0) * share[i]; });
     lean += t * 1.5; weight += 1.5; p.basis.push('TERPENES');
   }
-  if (s.effects) {
+  const effects = s.effects || (s.note?.effects || []).join(',');
+  if (effects || s.note?.overall) {
     let e = 0;
-    for (const word of s.effects.split(',')) e += EFFECT_LEAN[word.trim()] || 0;
-    lean += e; weight += 2; p.basis.push('REPORTED EFFECTS');
+    for (const word of effects.split(',')) e += EFFECT_LEAN[word.trim()] || 0;
+    if (effects) { lean += e; weight += 2; }
+    if (s.note?.overall) { lean += FEEL_LEAN[s.note.overall] * 2; weight += 2; }
+    p.basis.push(s.effects ? 'REPORTED EFFECTS' : 'AI REFERENCE NOTES');
   }
   const feels = { ...(c.feels || {}) };
   const feelVotes = Object.values(feels).reduce((n, v) => n + v, 0);
@@ -140,7 +144,7 @@ function profileRows(s, row) {
   }
   if (p.potency) out.push(row('POTENCY', `${p.potency.tier}<br><span class="sub">${p.potency.lab ? 'MEDIAN' : 'TYPICAL'} ${p.potency.thc}% THC IN FLOWER</span>`));
   if (!s.terpenes && p.terpenes.length) out.push(row('TERPENES', `${p.terpenes.join(', ')}<br><span class="sub">FROM ${p.terpSrc}</span>`));
-  if (p.aroma && !s.flavors) out.push(row('AROMA', p.aroma.toUpperCase()));
+  if (p.aroma && !s.flavors && !s.note?.flavors?.length) out.push(row('AROMA', p.aroma.toUpperCase()));
   if (p.feel) out.push(row('USERS SAY', `${p.feel.value.toUpperCase()} · ${p.feel.n} OF ${p.feel.total}${p.feel.confirmed ? ' · CONFIRMED' : ''}`));
   if (!out.length) return `<p class="sub">NO PROFILE YET. ANSWER THE LABEL QUESTIONS OR RATE IT TO START ONE.</p>`;
   return out.join('') + (p.basis.length ? `<p class="sub" style="margin-top:6px">PROFILE BASIS: ${p.basis.join(' + ')}. A TENDENCY, NOT A GUARANTEE.</p>` : '');
@@ -150,7 +154,7 @@ function profileRows(s, row) {
 function profileSpeech(s) {
   const p = strainProfile(s);
   const say = [];
-  if (p.type && !hasOwnType(s)) say.push(`Type: ${p.type.value}, ${p.type.src.toLowerCase().replace('one report, unconfirmed', 'from one unconfirmed report')}.`);
+  if (p.type && !hasOwnType(s)) say.push(`Type: ${p.type.value}, ${p.type.src.toLowerCase().replace('one report, unconfirmed', 'from one unconfirmed report').replace('ai reference notes', 'from A.I. reference notes, not verified')}.`);
   if (p.time) {
     const when = { DAYTIME: 'daytime', ANYTIME: 'any time of day', EVENING: 'the evening', 'NIGHT / SLEEP': 'night time and sleep' }[p.time];
     say.push(`${p.thin ? 'Rough estimate: best' : 'Best'} for ${when}. Expect it to be ${p.vibe.join(', ').toLowerCase().replace('couch-lock likely', 'likely to couch lock you')}.`);
