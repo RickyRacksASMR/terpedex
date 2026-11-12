@@ -16,7 +16,7 @@ const TERPS = ['Myrcene', 'Limonene', 'Caryophyllene', 'Pinene', 'Linalool', 'Te
 const EFFECTS = ['Sleepy', 'Heavy', 'Relaxed', 'Calm', 'Mellow', 'Hungry', 'Energetic', 'Uplifted', 'Focused', 'Clear', 'Creative', 'Talkative', 'Euphoric', 'Happy', 'Giggly'];
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // Research draws on the account's shared daily Workers AI allowance, so keep it to a small slice.
-const MAX_RESEARCH_PER_DAY = 30;
+const MAX_RESEARCH_PER_DAY = 50;
 const MAX_RESEARCH_PER_DEVICE_PER_DAY = 15;
 const DAY = 24 * 60 * 60 * 1000;
 const MAX_REPORTS_PER_DAY = 60;
