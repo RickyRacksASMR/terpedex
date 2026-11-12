@@ -8,6 +8,8 @@
 //                     Workers AI model and then cached for everyone
 //
 // Nothing here is trusted as fact: an entry only says what users reported, and how many did.
+// Every query uses bound parameters, and every value written is checked against a fixed list
+// or a strict pattern first.
 
 const LANES = ['FLOWER', 'CONCENTRATES', 'TOPICALS', 'EDIBLES'];
 const TYPES = ['Indica', 'Sativa', 'Hybrid'];
@@ -17,10 +19,7 @@ const EFFECTS = ['Sleepy', 'Heavy', 'Relaxed', 'Calm', 'Mellow', 'Hungry', 'Ener
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // Research draws on the account's shared daily Workers AI allowance, so keep it to a small slice.
 const MAX_RESEARCH_PER_DAY = 50;
-const MAX_RESEARCH_PER_DEVICE_PER_DAY = 15;
 const DAY = 24 * 60 * 60 * 1000;
-const MAX_REPORTS_PER_DAY = 60;
-const MAX_NEW_STRAINS_PER_DAY = 15;
 
 const norm = (s) => s.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 
@@ -41,7 +40,13 @@ function cors(origin) {
 function json(data, status, origin) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors(origin) },
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+      ...cors(origin),
+    },
   });
 }
 
@@ -119,9 +124,66 @@ function cleanNote(raw) {
   return note.type || note.summary ? note : null;
 }
 
-async function research(req, env) {
-  let body;
-  try { body = await req.json(); } catch { throw new HttpError(400, 'Body must be JSON.'); }
+// ---------- rate limits ----------
+// Device ids are made by the app, so anyone can invent new ones; the limits that matter
+// are per network address and app-wide. Addresses are never stored: each becomes a salted
+// hash that changes every day, kept only as a counter key until the next day's cleanup.
+const LIMITS = {
+  burst: 40,              // requests per address per minute
+  report: [300, 60],      // reports per day: per address, per device
+  newStrain: [30, 15],    // brand-new strain names per day: per address, per device
+  newStrainAll: 400,      // brand-new strain names per day across everyone
+  research: [20, 15],     // AI lookups per day: per address, per device
+};
+
+// The salt is random, made by the server on first use and kept only in its database,
+// so the hashes cannot be turned back into addresses.
+let saltCache = null;
+async function salt(env) {
+  if (saltCache) return saltCache;
+  const fresh = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  await env.DB.prepare("INSERT OR IGNORE INTO config (k, v) VALUES ('ip_salt', ?1)").bind(fresh).run();
+  const row = await env.DB.prepare("SELECT v FROM config WHERE k = 'ip_salt'").first();
+  saltCache = row.v;
+  return saltCache;
+}
+
+async function addressKey(req, env) {
+  const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+  const day = Math.floor(Date.now() / DAY);
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${await salt(env)}|${day}|${ip}`));
+  return [...new Uint8Array(bytes)].slice(0, 12).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Take one slot from a counter, atomically: a single statement both checks and counts,
+// so a burst of parallel requests cannot slip past the limit.
+async function take(env, bucket, max, windowMs = DAY) {
+  const win = Math.floor(Date.now() / windowMs);
+  const row = await env.DB.prepare(
+    `INSERT INTO limits (bucket, win, n) VALUES (?1, ?2, 1)
+     ON CONFLICT (bucket, win) DO UPDATE SET n = n + 1 WHERE n < ?3
+     RETURNING n`,
+  ).bind(bucket, win, max).first();
+  return !!row;
+}
+
+async function takeAll(env, list, message) {
+  for (const [bucket, max, windowMs] of list) {
+    if (!(await take(env, bucket, max, windowMs))) throw new HttpError(429, message);
+  }
+}
+
+// Read a small JSON body. Anything big is refused before parsing.
+async function readBody(req) {
+  const len = Number(req.headers.get('Content-Length') || 0);
+  if (len > 2048) throw new HttpError(413, 'Request too large.');
+  const raw = await req.text();
+  if (raw.length > 2048) throw new HttpError(413, 'Request too large.');
+  try { return JSON.parse(raw); } catch { throw new HttpError(400, 'Body must be JSON.'); }
+}
+
+async function research(req, env, addr) {
+  const body = await readBody(req);
   const name = String(body.name || '').replace(/\s+/g, ' ').trim();
   const key = norm(name);
   if (name.length < 3 || name.length > 40 || !/^[A-Za-z0-9#'&.\- ]+$/.test(name) || !/[A-Z]{3}/.test(key)) {
@@ -135,12 +197,12 @@ async function research(req, env) {
 
   if (!env.AI) throw new HttpError(503, 'Research is not set up.');
   const now = Date.now();
-  const used = await env.DB.prepare(
-    'SELECT COUNT(*) AS total, SUM(CASE WHEN created_by = ?1 THEN 1 ELSE 0 END) AS mine FROM notes WHERE created_at > ?2',
-  ).bind(device, now - DAY).first();
-  if (used.total >= MAX_RESEARCH_PER_DAY || (used.mine || 0) >= MAX_RESEARCH_PER_DEVICE_PER_DAY) {
-    throw new HttpError(429, 'Research limit reached for today.');
-  }
+  // The app-wide cap goes last, so a request refused for its own limits does not use it up.
+  await takeAll(env, [
+    [`a:${addr}:research`, LIMITS.research[0]],
+    [`d:${device}:research`, LIMITS.research[1]],
+    ['all:research', MAX_RESEARCH_PER_DAY],
+  ], 'Research limit reached for today.');
 
   let note = null, tokensIn = 0, tokensOut = 0;
   try {
@@ -167,9 +229,8 @@ async function research(req, env) {
   return { note, cached: false };
 }
 
-async function report(req, env) {
-  let body;
-  try { body = await req.json(); } catch { throw new HttpError(400, 'Body must be JSON.'); }
+async function report(req, env, addr) {
+  const body = await readBody(req);
 
   const name = String(body.name || '').replace(/\s+/g, ' ').trim();
   const key = norm(name);
@@ -185,20 +246,23 @@ async function report(req, env) {
   const terp = TERPS.includes(body.terp) ? body.terp : null;
   const feel = FEELS.includes(body.feel) ? body.feel : null;
 
-  // Region comes from Cloudflare's edge, not from the client. The IP itself is never stored.
+  // Region comes from Cloudflare's edge, not from the client. The address itself is never stored.
   const cf = req.cf || {};
   const state = cf.country === 'US' && /^[A-Z]{2}$/.test(cf.regionCode || '') ? cf.regionCode : (cf.country || '??');
 
   const now = Date.now();
-  const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE device = ?1 AND updated_at > ?2')
-    .bind(device, now - DAY).first();
-  if (recent.n >= MAX_REPORTS_PER_DAY) throw new HttpError(429, 'Daily limit reached. Try again tomorrow.');
+  await takeAll(env, [
+    [`a:${addr}:report`, LIMITS.report[0]],
+    [`d:${device}:report`, LIMITS.report[1]],
+  ], 'Daily limit reached. Try again tomorrow.');
 
   const exists = await env.DB.prepare('SELECT 1 AS x FROM strains WHERE key = ?1').bind(key).first();
   if (!exists) {
-    const made = await env.DB.prepare('SELECT COUNT(*) AS n FROM strains WHERE created_by = ?1 AND created_at > ?2')
-      .bind(device, now - DAY).first();
-    if (made.n >= MAX_NEW_STRAINS_PER_DAY) throw new HttpError(429, 'Daily limit for new strains reached.');
+    await takeAll(env, [
+      [`a:${addr}:new`, LIMITS.newStrain[0]],
+      [`d:${device}:new`, LIMITS.newStrain[1]],
+      ['all:new', LIMITS.newStrainAll],
+    ], 'Daily limit for new strains reached.');
   }
 
   await env.DB.batch([
@@ -223,16 +287,22 @@ export default {
     const allowed = (env.ALLOWED_ORIGINS || '').split(',').includes(origin) ? origin : '';
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(allowed) });
     try {
+      // Writes: browsers always send Origin on cross-site POSTs, so pages we don't know are
+      // refused. A script can fake Origin, which is why the address limits below exist.
+      let addr = null;
+      if (req.method === 'POST') {
+        if (!allowed) throw new HttpError(403, 'Origin not allowed.');
+        addr = await addressKey(req, env);
+        await takeAll(env, [[`a:${addr}:burst`, LIMITS.burst, 60 * 1000]], 'Too many requests. Slow down.');
+        // Now and then, clear counters from before yesterday.
+        if (Math.random() < 0.02) {
+          await env.DB.prepare('DELETE FROM limits WHERE win < ?1 AND win > 1000000').bind(Math.floor(Date.now() / 60000) - 2 * 1440).run();
+          await env.DB.prepare('DELETE FROM limits WHERE win < ?1').bind(Math.floor(Date.now() / DAY) - 1).run();
+        }
+      }
       if (req.method === 'GET' && url.pathname === '/strains') return json({ strains: await summaries(env) }, 200, allowed);
-      if (req.method === 'POST' && url.pathname === '/report') {
-        // Browsers always send Origin on cross-site POSTs; refuse pages we don't know.
-        if (!allowed) throw new HttpError(403, 'Origin not allowed.');
-        return json(await report(req, env), 200, allowed);
-      }
-      if (req.method === 'POST' && url.pathname === '/research') {
-        if (!allowed) throw new HttpError(403, 'Origin not allowed.');
-        return json(await research(req, env), 200, allowed);
-      }
+      if (req.method === 'POST' && url.pathname === '/report') return json(await report(req, env, addr), 200, allowed);
+      if (req.method === 'POST' && url.pathname === '/research') return json(await research(req, env, addr), 200, allowed);
       if (url.pathname === '/') return json({ service: 'terpedex-api', ok: true }, 200, allowed);
       throw new HttpError(404, 'Not found.');
     } catch (e) {

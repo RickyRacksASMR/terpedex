@@ -39,3 +39,18 @@ CREATE TABLE IF NOT EXISTS notes (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notes_created ON notes (created_at);
+
+-- Rate-limit counters. `bucket` names what is counted and for whom (a daily-salted address
+-- hash, a device id, or "all"); `win` is the day or minute number the count belongs to.
+CREATE TABLE IF NOT EXISTS limits (
+  bucket TEXT NOT NULL,
+  win    INTEGER NOT NULL,
+  n      INTEGER NOT NULL,
+  PRIMARY KEY (bucket, win)
+);
+
+-- Private server settings, such as the random salt for address hashes. Never sent out.
+CREATE TABLE IF NOT EXISTS config (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);

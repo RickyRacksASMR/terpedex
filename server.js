@@ -15,12 +15,18 @@ const TYPES = {
 };
 
 http.createServer((req, res) => {
-  const urlPath = decodeURIComponent(req.url.split('?')[0]);
-  const file = path.join(ROOT, urlPath === '/' ? 'index.html' : urlPath);
-  if (!file.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
+  let urlPath;
+  try { urlPath = decodeURIComponent(req.url.split('?')[0]); } catch { res.writeHead(400); return res.end(); }
+  const file = path.resolve(ROOT, '.' + path.posix.normalize('/' + (urlPath === '/' ? 'index.html' : urlPath)));
+  // Only files inside this folder, and never the server code, git data or local settings.
+  const rel = path.relative(ROOT, file);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || /(^|[\\/])(\.|server[\\/]|node_modules)/.test(rel)) {
+    res.writeHead(404); return res.end('Not found');
+  }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); return res.end('Not found'); }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(data);
   });
-}).listen(PORT, () => console.log(`Terpedex running at http://localhost:${PORT}`));
+// Listen on this computer only, not the local network.
+}).listen(PORT, '127.0.0.1', () => console.log(`Terpedex running at http://localhost:${PORT}`));

@@ -137,15 +137,15 @@ function strainProfile(s) {
 function profileRows(s, row) {
   const p = strainProfile(s);
   const out = [];
-  if (p.type && !hasOwnType(s)) out.push(row('TYPE', `${p.type.value.toUpperCase()}<br><span class="sub">${p.type.src}</span>`));
+  if (p.type && !hasOwnType(s)) out.push(row('TYPE', `${esc(p.type.value.toUpperCase())}<br><span class="sub">${esc(p.type.src)}</span>`));
   if (p.time) {
-    out.push(row('BEST FOR', p.time + (p.thin ? '?' : '')));
-    out.push(row('VIBE', p.vibe.join(' · ') + (p.thin ? '<br><span class="sub">ROUGH ESTIMATE</span>' : '')));
+    out.push(row('BEST FOR', esc(p.time + (p.thin ? '?' : ''))));
+    out.push(row('VIBE', esc(p.vibe.join(' · ')) + (p.thin ? '<br><span class="sub">ROUGH ESTIMATE</span>' : '')));
   }
-  if (p.potency) out.push(row('POTENCY', `${p.potency.tier}<br><span class="sub">${p.potency.lab ? 'MEDIAN' : 'TYPICAL'} ${p.potency.thc}% THC IN FLOWER</span>`));
-  if (!s.terpenes && p.terpenes.length) out.push(row('TERPENES', `${p.terpenes.join(', ')}<br><span class="sub">FROM ${p.terpSrc}</span>`));
-  if (p.aroma && !s.flavors && !s.note?.flavors?.length) out.push(row('AROMA', p.aroma.toUpperCase()));
-  if (p.feel) out.push(row('USERS SAY', `${p.feel.value.toUpperCase()} · ${p.feel.n} OF ${p.feel.total}${p.feel.confirmed ? ' · CONFIRMED' : ''}`));
+  if (p.potency) out.push(row('POTENCY', `${esc(p.potency.tier)}<br><span class="sub">${p.potency.lab ? 'MEDIAN' : 'TYPICAL'} ${Number(p.potency.thc)}% THC IN FLOWER</span>`));
+  if (!s.terpenes && p.terpenes.length) out.push(row('TERPENES', `${esc(p.terpenes.join(', '))}<br><span class="sub">FROM ${esc(p.terpSrc)}</span>`));
+  if (p.aroma && !s.flavors && !s.note?.flavors?.length) out.push(row('AROMA', esc(p.aroma.toUpperCase())));
+  if (p.feel) out.push(row('USERS SAY', esc(`${p.feel.value.toUpperCase()} · ${p.feel.n} OF ${p.feel.total}${p.feel.confirmed ? ' · CONFIRMED' : ''}`)));
   if (!out.length) return `<p class="sub">NO PROFILE YET. ANSWER THE LABEL QUESTIONS OR RATE IT TO START ONE.</p>`;
   return out.join('') + (p.basis.length ? `<p class="sub" style="margin-top:6px">PROFILE BASIS: ${p.basis.join(' + ')}. A TENDENCY, NOT A GUARANTEE.</p>` : '');
 }

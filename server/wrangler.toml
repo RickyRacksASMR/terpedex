@@ -4,7 +4,8 @@ compatibility_date = "2026-01-01"
 
 [vars]
 # Pages allowed to write to the shared database.
-ALLOWED_ORIGINS = "https://rickyracksasmr.github.io,http://localhost:4747"
+ALLOWED_ORIGINS = "https://rickyracksasmr.github.io"
+# Local testing adds http://localhost:4747 through .dev.vars, which is not committed.
 
 [[d1_databases]]
 binding = "DB"

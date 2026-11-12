@@ -1,5 +1,13 @@
 /* Terpedex prototype: retro strain index. No build step, no backend. */
 
+// Refuse to run inside another site's frame (clickjacking). GitHub Pages can't send the
+// header that normally does this, so the page checks for itself.
+if (window.top !== window.self) {
+  document.documentElement.innerHTML = '';
+  try { window.top.location.replace(window.location.href); } catch { /* blocked: stay blank */ }
+  throw new Error('Terpedex must not run inside a frame.');
+}
+
 const $ = (s) => document.querySelector(s);
 const lcd = $('#lcd');
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -428,7 +436,7 @@ function loadOCR() {
   if (window.Tesseract) return Promise.resolve();
   return new Promise((res, rej) => {
     const el = document.createElement('script');
-    el.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    el.src = 'vendor/tesseract/tesseract.min.js';
     el.onload = res;
     el.onerror = () => rej(new Error('COULD NOT LOAD THE TEXT READER. CHECK YOUR CONNECTION.'));
     document.head.append(el);
@@ -440,7 +448,14 @@ let workerP = null;
 function getWorker() {
   if (!workerP) {
     workerP = loadOCR().then(async () => {
-      const w = await Tesseract.createWorker('eng');
+      // Everything the reader needs is hosted with the app, so no outside site can swap it out.
+      const base = new URL('vendor/tesseract/', location.href).href;
+      const w = await Tesseract.createWorker('eng', 1, {
+        workerPath: base + 'worker.min.js',
+        corePath: base + 'core/',
+        langPath: base + 'lang',
+        workerBlobURL: false,
+      });
       await w.setParameters({ tessedit_pageseg_mode: '11' });
       return w;
     }).catch((e) => { workerP = null; throw e; });
@@ -679,7 +694,7 @@ const screens = {
       const tag = hasOwnType(s) ? s.type : pt && !pt.guess ? pt.value + (/UNCONFIRMED/.test(pt.src) ? ' ?' : '') : s.shared && s.community.users < 2 ? 'Unconfirmed' : s.type;
       const lineage = s.lineage || note.lineage, flavors = s.flavors || (note.flavors || []).join(', '), effects = s.effects || (note.effects || []).join(', ');
       const blurb = !s.note ? s.blurb : s.fromLab ? `Measured in ${s.lab.n} public lab tests of flower.` : s.custom ? 'Registered from your own label.' : s.blurb;
-      const vote = (label, c) => `${label}: ${c.value.toUpperCase()} · ${c.n} OF ${c.total} · ${c.confirmed ? 'CONFIRMED' : 'UNCONFIRMED'}`;
+      const vote = (label, c) => esc(`${label}: ${c.value.toUpperCase()} · ${c.n} OF ${c.total} · ${c.confirmed ? 'CONFIRMED' : 'UNCONFIRMED'}`);
       return (S.isNew ? `<div class="new blink">★ NEW STRAIN REGISTERED ★</div>` : '') +
         `<div class="entry-head">${sprite(s)}<div><div class="no">No.${s.no}</div><div class="name">${esc(s.name.toUpperCase())}</div><span class="tag">${esc(tag.toUpperCase())}</span></div></div>` +
         (note.summary ? `<p>${esc(note.summary)}</p>` : '') + `<p${note.summary ? ' class="sub"' : ''}>${esc(blurb)}</p>` +
@@ -687,16 +702,16 @@ const screens = {
         row('LINEAGE', lineage && esc(lineage)) +
         row('LEANING', note.leaning && esc(note.leaning.toUpperCase())) +
         thcRow +
-        row('YOUR LABEL', [l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · ')) +
-        row('YOUR RATING', l.feel && l.feel.toUpperCase()) +
+        row('YOUR LABEL', esc([l.thc != null && `${l.thc}% THC`, l.type && l.type.toUpperCase(), l.terp && l.terp.toUpperCase()].filter(Boolean).join(' · '))) +
+        row('YOUR RATING', l.feel && esc(l.feel.toUpperCase())) +
         row('TERPENES', s.terpenes && esc(s.terpenes)) +
         row('FLAVOR', flavors && esc(flavors)) +
         row('REPORTED', effects && esc(effects)) +
         `<div class="rule"></div><p class="new" style="margin-bottom:6px">PROFILE</p>` + profileRows(s, row) + `<div class="rule"></div>` +
-        row('LAB DATA', s.lab && `${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`) +
+        row('LAB DATA', s.lab && esc(`${s.lab.n} FLOWER TESTS · MEDIAN ${s.lab.med}% THC${s.lab.terp ? ` · ${s.lab.terp}% TERPENES` : ''} · ${s.lab.states}`)) +
         row('YOUR LANE', s.custom && S.profile.type) +
-        row('COMMUNITY', s.community && [`${s.community.users} ${s.community.users === 1 ? 'USER' : 'USERS'}${s.community.states ? ` · ${s.community.states}` : ''}`,
-          ...Object.entries(s.community.thc).map(([lane, t]) => `${lane} LABELS ${t.lo === t.hi ? t.lo : `${t.lo}–${t.hi}`}% THC (${t.n})`),
+        row('COMMUNITY', s.community && [`${Number(s.community.users)} ${s.community.users === 1 ? 'USER' : 'USERS'}${s.community.states ? ` · ${esc(s.community.states)}` : ''}`,
+          ...Object.entries(s.community.thc).map(([lane, t]) => esc(`${lane} LABELS ${t.lo === t.hi ? t.lo : `${t.lo}–${t.hi}`}% THC (${t.n})`)),
           ct && vote('TYPE', ct), cp && vote('TOP TERPENE', cp)].filter(Boolean).join('<br>')) +
         `<div class="rule"></div>` + (tip ? `<p class="sub">${esc(tip)}</p>` : '') +
         `<p class="sub">SCANNED ${l.n || 0}X · ${s.effects ? 'EFFECTS VARY BY PERSON AND BATCH. ' : ''}NOT MEDICAL ADVICE.</p>` +

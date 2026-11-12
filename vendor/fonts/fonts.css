@@ -1,0 +1,15 @@
+/* Press Start 2P and VT323 are licensed under the SIL Open Font License 1.1. Hosted here so the page loads nothing from other sites. */
+@font-face {
+  font-family: 'Press Start 2P';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(press-start-2p.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'VT323';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(vt323.woff2) format('woff2');
+}
